@@ -2,6 +2,11 @@
 name = "soundlooper"
 version = "0.1.0"
 edition = "2024"
+description = "Terminal-based audio workstation for live looping and music creation. Built with Rust for high-performance real-time audio processing."
+repository = "https://github.com/Cod-e-Codes/soundlooper"
+license = "MIT"
+keywords = ["audio", "music", "rust", "real-time", "terminal", "cross-platform", "daw", "tui", "wav", "audio-engine", "recording", "looper", "music-production", "audio-processing", "mixing", "cpal", "live-performance", "ratatui"]
+categories = ["command-line-utilities", "multimedia::audio"]
 
 [dependencies]
 anyhow = "1.0.100"
