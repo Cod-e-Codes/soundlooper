@@ -33,11 +33,12 @@ impl AudioLayer {
     pub fn start_recording(&mut self) {
         self.is_recording = true;
         self.is_playing = false;
-        // Store previous buffer for undo
+        // Store previous buffer for undo (only if not empty to avoid unnecessary clone)
         if !self.buffer.is_empty() {
-            self.previous_buffer = Some(self.buffer.clone());
+            self.previous_buffer = Some(std::mem::take(&mut self.buffer));
+        } else {
+            self.buffer.clear(); // Ensure it's clear
         }
-        self.buffer.clear();
         self.playback_position = 0;
         self.loop_start = 0;
         self.loop_end = 0;

@@ -121,21 +121,35 @@ impl LooperEngine {
         }
 
         // Only process tempo if beat sync or metronome is enabled
-        let beat_sync_enabled = self.beat_sync_enabled.lock().map(|b| *b).unwrap_or(false);
-        let metronome_enabled = self.metronome_enabled.lock().map(|b| *b).unwrap_or(false);
+        let (beat_sync_enabled, metronome_enabled) = (
+            self.beat_sync_enabled.lock().map(|b| *b).unwrap_or(false),
+            self.metronome_enabled.lock().map(|b| *b).unwrap_or(false),
+        );
 
         if beat_sync_enabled || metronome_enabled {
             let processed_samples = input.len();
-            let (crossed_measure, crossed_beat) = {
+            let (crossed_measure, crossed_beat, count_in_data) = {
                 if let Ok(mut tempo) = self.tempo.lock() {
                     let prev_measure = tempo.get_current_measure();
                     let prev_beat = tempo.get_current_beat();
                     tempo.advance(processed_samples);
                     let curr_measure = tempo.get_current_measure();
                     let curr_beat = tempo.get_current_beat();
-                    (curr_measure != prev_measure, curr_beat != prev_beat)
+                    let count_in_data =
+                        if tempo.count_in_active && tempo.count_in_remaining_beats > 0 {
+                            tempo
+                                .count_in_layer
+                                .map(|layer_id| (layer_id, tempo.count_in_remaining_beats))
+                        } else {
+                            None
+                        };
+                    (
+                        curr_measure != prev_measure,
+                        curr_beat != prev_beat,
+                        count_in_data,
+                    )
                 } else {
-                    (false, false)
+                    (false, false, None)
                 }
             };
 
@@ -145,15 +159,11 @@ impl LooperEngine {
 
             if crossed_beat {
                 self.trigger_metronome_click();
-                // Only emit count-in events when needed to reduce audio thread overhead
-                if let Ok(tempo) = self.tempo.lock()
-                    && tempo.count_in_active
-                    && tempo.count_in_remaining_beats > 0
-                    && let Some(layer_id) = tempo.count_in_layer
-                {
+                // Emit count-in event without additional lock acquisition
+                if let Some((layer_id, remaining_beats)) = count_in_data {
                     self.send_event(AudioEvent::CountInTick {
                         layer_id,
-                        remaining_beats: tempo.count_in_remaining_beats,
+                        remaining_beats,
                     });
                 }
             }
