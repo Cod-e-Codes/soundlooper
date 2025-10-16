@@ -44,6 +44,8 @@ fn print_help() {
     println!("    X      Clear all layers");
     println!("    I      Import WAV file to selected layer");
     println!("    E      Export composition as WAV");
+    println!("    Z      Undo on selected layer");
+    println!("    Y      Redo on selected layer");
     println!("    B      Tap tempo");
     println!("    T      Set BPM");
     println!("    G      Toggle beat sync");

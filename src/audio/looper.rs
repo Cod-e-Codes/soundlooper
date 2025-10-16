@@ -576,7 +576,28 @@ impl LooperEngine {
                     let mut is_recording = self.is_recording.lock().unwrap();
                     *is_recording = false;
                 }
-                self.send_event(AudioEvent::AllCleared);
+            }
+            LayerCommand::Undo(layer_id) => {
+                if layer_id >= self.config.max_layers {
+                    return Err("Layer ID out of range".into());
+                }
+
+                if let Ok(mut layer) = self.layers[layer_id].lock()
+                    && layer.undo()
+                {
+                    self.send_event(AudioEvent::LayerUpdated(layer_id));
+                }
+            }
+            LayerCommand::Redo(layer_id) => {
+                if layer_id >= self.config.max_layers {
+                    return Err("Layer ID out of range".into());
+                }
+
+                if let Ok(mut layer) = self.layers[layer_id].lock()
+                    && layer.redo()
+                {
+                    self.send_event(AudioEvent::LayerUpdated(layer_id));
+                }
             }
             LayerCommand::PlayAll => {
                 for layer_arc in self.layers.iter() {

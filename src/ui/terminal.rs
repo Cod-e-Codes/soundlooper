@@ -341,6 +341,18 @@ impl TerminalUI {
                 // Export composition as WAV
                 self.export_composition();
             }
+            KeyCode::Char('z') => {
+                // Undo on selected layer
+                let _ = self
+                    .command_sender
+                    .send(LayerCommand::Undo(self.selected_layer));
+            }
+            KeyCode::Char('y') => {
+                // Redo on selected layer
+                let _ = self
+                    .command_sender
+                    .send(LayerCommand::Redo(self.selected_layer));
+            }
             _ => {}
         }
         Ok(())
@@ -1760,6 +1772,10 @@ impl TerminalUI {
         line2_spans.extend(key_desc("E", "Export"));
         line2_spans.push(separator());
         line2_spans.extend(key_desc("O", "Options"));
+        line2_spans.push(separator());
+        line2_spans.extend(key_desc("Z", "Undo"));
+        line2_spans.push(separator());
+        line2_spans.extend(key_desc("Y", "Redo"));
         line2_spans.push(separator());
         line2_spans.extend(key_desc("Q", "Quit"));
 

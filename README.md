@@ -9,6 +9,10 @@ A real-time multi-layer audio looper built in Rust with a terminal UI. Record, m
 - **Multi-layer Recording**: Record up to 16 simultaneous audio layers
 - **Real-time Playback**: Low-latency audio processing with looping
 - **Per-layer Controls**: Individual volume, mute, and solo controls
+- **5-Level Undo/Redo**: Navigate through up to 5 previous states per layer
+- **Real-time Peak Meters**: Color-coded dB level monitoring with peak hold
+- **SIMD-Accelerated Mixing**: Fast multi-layer mixing performance
+- **Lock-Free Audio Buffers**: Eliminates mutex contention for lower latency
 - **WAV Import/Export**: Import WAV files into layers and export compositions
 - **Terminal UI**: Clean, responsive TUI with device information display
 - **Options Panel**: Choose input/output audio devices directly from the TUI
@@ -54,6 +58,8 @@ cargo run --release -- --debug
 | `X` | Clear all layers |
 | `I` | Import WAV file to selected layer |
 | `E` | Export composition as WAV |
+| `Z` | Undo on selected layer |
+| `Y` | Redo on selected layer |
 | `O` | Options (select input/output devices) |
 | `B` | Tap tempo |
 | `T` | Set BPM |
@@ -76,6 +82,10 @@ The application is built with a modular architecture:
 - `LooperEngine`: Manages all layers and handles real-time mixing
 - `TempoEngine`: BPM tracking, beat synchronization, and count-in functionality
 - `AudioStream`: CPAL-based audio input/output handling with resampling
+- `LockFreeAudioBuffer`: High-performance, non-blocking audio data transfer
+- `SimdMixer`: SIMD-accelerated multi-layer audio mixing
+- `PeakMeter`: Real-time audio level monitoring with color-coded display
+- `UndoHistory`: 5-level circular buffer for layer state management
 - `TerminalUI`: Terminal-based user interface
 
 ## Building

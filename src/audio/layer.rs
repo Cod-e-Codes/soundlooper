@@ -10,7 +10,7 @@ pub struct AudioLayer {
     pub playback_position: usize,
     pub loop_start: usize,
     pub loop_end: usize,
-    pub previous_buffer: Option<Vec<f32>>,
+    pub undo_history: crate::audio::undo_history::UndoHistory,
     pub meter: crate::audio::peak_meter::PeakMeter,
 }
 
@@ -27,7 +27,7 @@ impl AudioLayer {
             playback_position: 0,
             loop_start: 0,
             loop_end: 0,
-            previous_buffer: None,
+            undo_history: crate::audio::undo_history::UndoHistory::new(),
             meter: crate::audio::peak_meter::PeakMeter::new(),
         }
     }
@@ -35,12 +35,11 @@ impl AudioLayer {
     pub fn start_recording(&mut self) {
         self.is_recording = true;
         self.is_playing = false;
-        // Store previous buffer for undo (only if not empty to avoid unnecessary clone)
-        if !self.buffer.is_empty() {
-            self.previous_buffer = Some(std::mem::take(&mut self.buffer));
-        } else {
-            self.buffer.clear(); // Ensure it's clear
-        }
+
+        // Save current state to undo history before starting recording
+        self.save_state_to_history();
+
+        self.buffer.clear();
         self.playback_position = 0;
         self.loop_start = 0;
         self.loop_end = 0;
@@ -130,25 +129,73 @@ impl AudioLayer {
     }
 
     pub fn undo(&mut self) -> bool {
-        if let Some(prev_buffer) = self.previous_buffer.take() {
-            self.buffer = prev_buffer;
-            self.loop_end = self.buffer.len();
-            self.playback_position = self.loop_start;
+        if let Some(snapshot) = self.undo_history.undo() {
+            self.apply_snapshot(snapshot);
             true
         } else {
             false
         }
     }
 
+    pub fn redo(&mut self) -> bool {
+        if let Some(snapshot) = self.undo_history.redo() {
+            self.apply_snapshot(snapshot);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.undo_history.can_undo()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.undo_history.can_redo()
+    }
+
     pub fn clear(&mut self) {
+        // Save state before clearing
+        self.save_state_to_history();
+
         self.buffer.clear();
         self.is_recording = false;
         self.is_playing = false;
         self.playback_position = 0;
         self.loop_start = 0;
         self.loop_end = 0;
-        self.previous_buffer = None;
         self.meter.reset();
+    }
+
+    /// Save current layer state to undo history
+    fn save_state_to_history(&mut self) {
+        let snapshot = crate::audio::undo_history::LayerSnapshot {
+            buffer: self.buffer.clone(),
+            volume: self.volume,
+            loop_start: self.loop_start,
+            loop_end: self.loop_end,
+            playback_position: self.playback_position,
+            is_muted: self.is_muted,
+            is_solo: self.is_solo,
+        };
+        self.undo_history.save_state(snapshot);
+    }
+
+    /// Apply a snapshot to the current layer state
+    fn apply_snapshot(&mut self, snapshot: crate::audio::undo_history::LayerSnapshot) {
+        self.buffer = snapshot.buffer;
+        self.volume = snapshot.volume;
+        self.loop_start = snapshot.loop_start;
+        self.loop_end = snapshot.loop_end;
+        self.playback_position = snapshot.playback_position;
+        self.is_muted = snapshot.is_muted;
+        self.is_solo = snapshot.is_solo;
+
+        // Update playback state based on buffer
+        if self.buffer.is_empty() {
+            self.is_playing = false;
+            self.is_recording = false;
+        }
     }
 
     pub fn is_empty(&self) -> bool {
