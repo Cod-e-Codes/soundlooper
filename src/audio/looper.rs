@@ -408,7 +408,6 @@ impl LooperEngine {
                         }
                     }
                     Err(e) => {
-                        eprintln!("Failed to import WAV: {}", e);
                         self.send_event(AudioEvent::Error(format!("Failed to import WAV: {}", e)));
                     }
                 }

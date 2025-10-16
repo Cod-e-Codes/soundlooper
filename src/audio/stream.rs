@@ -144,6 +144,9 @@ impl AudioStream {
         LooperEngine: Send + 'static,
     {
         // Set up the looper engine with channels
+        // Clone event sender for error callbacks before moving it into the engine
+        let input_err_sender = event_sender.clone();
+        let output_err_sender = event_sender.clone();
         looper_engine.set_command_channel(command_receiver);
         looper_engine.set_event_sender(event_sender);
         looper_engine.set_debug_mode(debug_mode);
@@ -163,7 +166,19 @@ impl AudioStream {
 
                 looper_clone.store_input_samples(&mono_data);
             },
-            move |err| eprintln!("❌ Input stream error: {}", err),
+            move |err| {
+                // Send error
+                let _ = input_err_sender.try_send(super::AudioEvent::Error(format!(
+                    "Input stream error: {}",
+                    err
+                )));
+                // Try to get a new default input and notify UI
+                let new_input = cpal::default_host()
+                    .default_input_device()
+                    .and_then(|d| d.name().ok());
+                let _ =
+                    input_err_sender.try_send(super::AudioEvent::DevicesUpdated(new_input, None));
+            },
             None,
         )?;
 
@@ -249,7 +264,18 @@ impl AudioStream {
                 // Reset phase when it gets too large
                 *phase_locked = (*phase_locked % input_buffer.len() as f64).max(0.0);
             },
-            move |err| eprintln!("❌ Output stream error: {}", err),
+            move |err| {
+                let _ = output_err_sender.try_send(super::AudioEvent::Error(format!(
+                    "Output stream error: {}",
+                    err
+                )));
+                // Try to get a new default output and notify UI
+                let new_output = cpal::default_host()
+                    .default_output_device()
+                    .and_then(|d| d.name().ok());
+                let _ =
+                    output_err_sender.try_send(super::AudioEvent::DevicesUpdated(None, new_output));
+            },
             None,
         )?;
 

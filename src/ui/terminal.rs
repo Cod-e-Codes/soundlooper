@@ -272,6 +272,17 @@ impl TerminalUI {
             AudioEvent::Error(msg) => {
                 self.show_success(&format!("Error: {}", msg));
             }
+            AudioEvent::DevicesUpdated(input, output) => {
+                match input {
+                    Some(name) => self.input_device_name = name,
+                    None => self.input_device_name = "No device".to_string(),
+                }
+                match output {
+                    Some(name) => self.output_device_name = name,
+                    None => self.output_device_name = "No device".to_string(),
+                }
+                self.show_success("Devices updated");
+            }
             _ => {
                 // no-op
             }

@@ -56,7 +56,8 @@ pub enum AudioEvent {
     LayerCleared(usize),
     AllCleared,
     AllPlaying,
-    WavImported(usize, String), // layer_id, file_path
-    WavExported(String),        // file_path
-    Error(String),              // error message
+    WavImported(usize, String),                     // layer_id, file_path
+    WavExported(String),                            // file_path
+    Error(String),                                  // error message
+    DevicesUpdated(Option<String>, Option<String>), // (input_name, output_name)
 }
