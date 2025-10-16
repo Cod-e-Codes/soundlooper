@@ -1,0 +1,33 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+debug.log
+
+# Audio files (optional - uncomment if you don't want to track audio files)
+# *.wav
+# *.mp3
+# *.flac
+
+# Temporary files
+*.tmp
+*.temp

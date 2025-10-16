@@ -1,0 +1,16 @@
+[package]
+name = "soundlooper"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+cpal = "0.16.0"
+crossbeam = "0.8.4"
+crossterm = "0.29.0"
+hound = "3.5.1"
+ratatui = "0.29.0"
+ringbuf = "0.4.8"
+rubato = "0.16.2"
+serde = "1.0.228"
+toml = "0.9.8"
