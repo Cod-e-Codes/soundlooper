@@ -184,7 +184,7 @@ impl AudioStream {
                 let count = callback_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                 // Periodic logging (only in debug mode)
-                if debug_mode && count % 200 == 0 {
+                if debug_mode && count.is_multiple_of(200) {
                     let _ = std::fs::OpenOptions::new()
                         .create(true)
                         .append(true)

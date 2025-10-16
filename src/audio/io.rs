@@ -9,12 +9,13 @@ pub fn import_wav<P: AsRef<Path>>(path: P, target_sample_rate: u32) -> Result<Ve
     let mut reader = WavReader::open(&path)?;
     let spec = reader.spec();
 
-    let samples: Vec<f32> = match spec.sample_format {
+    // Read samples as f32 in interleaved order
+    let raw_samples: Vec<f32> = match spec.sample_format {
         SampleFormat::Float => reader
             .samples::<f32>()
             .collect::<std::result::Result<Vec<_>, _>>()?,
         SampleFormat::Int => {
-            // Convert integer samples to float
+            // Convert integer samples to float in [-1.0, 1.0]
             let max_value = 2_i32.pow((spec.bits_per_sample - 1) as u32) as f32;
             reader
                 .samples::<i32>()
@@ -23,18 +24,24 @@ pub fn import_wav<P: AsRef<Path>>(path: P, target_sample_rate: u32) -> Result<Ve
         }
     };
 
-    // If sample rates match, return as is
+    // Downmix to mono if needed by averaging channels per frame
+    let mono_samples: Vec<f32> = if spec.channels > 1 {
+        let ch = spec.channels as usize;
+        raw_samples
+            .chunks(ch)
+            .map(|frame| frame.iter().sum::<f32>() / ch as f32)
+            .collect()
+    } else {
+        raw_samples
+    };
+
+    // If sample rates match, return mono as-is
     if spec.sample_rate == target_sample_rate {
-        return Ok(samples);
+        return Ok(mono_samples);
     }
 
-    // Resample if needed
-    resample_audio(
-        &samples,
-        spec.sample_rate,
-        target_sample_rate,
-        spec.channels as usize,
-    )
+    // Resample mono to target rate
+    resample_audio(&mono_samples, spec.sample_rate, target_sample_rate, 1)
 }
 
 pub fn export_wav<P: AsRef<Path>>(path: P, samples: &[f32], sample_rate: u32) -> Result<()> {

@@ -69,25 +69,31 @@ fn main() -> Result<()> {
         println!("Starting Soundlooper...");
     }
 
-    // Create audio configuration
-    let config = AudioConfig::default();
+    // Create a provisional audio config and audio stream to detect actual device rates
+    let provisional_config = AudioConfig::default();
+    let audio_stream = AudioStream::new(provisional_config.clone(), debug_mode)?;
+
+    // Build the runtime audio config to MATCH the device input sample rate
+    let runtime_config = AudioConfig {
+        sample_rate: audio_stream.get_sample_rate(),
+        buffer_size: provisional_config.buffer_size,
+        max_layers: provisional_config.max_layers,
+    };
+
     if debug_mode {
         println!(
             "Audio config: {}Hz, buffer size: {}, max layers: {}",
-            config.sample_rate, config.buffer_size, config.max_layers
+            runtime_config.sample_rate, runtime_config.buffer_size, runtime_config.max_layers
         );
     }
 
-    // Create looper engine (now thread-safe)
-    let looper_engine = Arc::new(LooperEngine::new(config.clone()));
+    // Create looper engine (now thread-safe) with the ACTUAL processing sample rate
+    let looper_engine = Arc::new(LooperEngine::new(runtime_config.clone()));
     let layers = looper_engine.get_layers();
 
     // Create communication channels
     let (command_sender, command_receiver) = channel::unbounded::<LayerCommand>();
     let (event_sender, event_receiver) = channel::unbounded::<AudioEvent>();
-
-    // Create audio stream
-    let audio_stream = AudioStream::new(config.clone(), debug_mode)?;
 
     // Extract device names before moving audio_stream into thread
     let input_device_name = audio_stream.get_input_device_name().to_string();

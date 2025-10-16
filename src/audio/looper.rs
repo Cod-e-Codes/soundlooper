@@ -45,7 +45,7 @@ impl LooperEngine {
             use std::sync::atomic::{AtomicUsize, Ordering};
             static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
             let count = CALL_COUNT.fetch_add(1, Ordering::Relaxed);
-            if count % 1000 == 0 {
+            if count.is_multiple_of(1000) {
                 let _ = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
@@ -408,6 +408,7 @@ impl LooperEngine {
                         }
                     }
                     Err(e) => {
+                        eprintln!("Failed to import WAV: {}", e);
                         self.send_event(AudioEvent::Error(format!("Failed to import WAV: {}", e)));
                     }
                 }

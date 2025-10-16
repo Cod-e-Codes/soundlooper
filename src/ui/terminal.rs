@@ -249,8 +249,21 @@ impl TerminalUI {
     }
 
     fn handle_audio_event(&mut self, _event: AudioEvent) {
-        // Handle audio events if needed
-        // For now, we'll just refresh the display
+        // Provide immediate user feedback on import/export results
+        match _event {
+            AudioEvent::WavImported(layer_id, path) => {
+                self.show_success(&format!("Imported to Layer {}: {}", layer_id + 1, path));
+            }
+            AudioEvent::WavExported(path) => {
+                self.show_success(&format!("Exported: {}", path));
+            }
+            AudioEvent::Error(msg) => {
+                self.show_success(&format!("Error: {}", msg));
+            }
+            _ => {
+                // no-op
+            }
+        }
     }
 
     fn toggle_layer_record(&mut self, layer_id: usize) {
@@ -393,12 +406,13 @@ impl TerminalUI {
                                     // Validate the file before importing
                                     match self.validate_import_file(&full_path) {
                                         Ok(_) => {
+                                            // Immediately show importing status
+                                            self.show_success(&format!("Importing: {}", full_path));
                                             let _ =
                                                 self.command_sender.send(LayerCommand::ImportWav(
                                                     layer_id,
                                                     full_path.clone(),
                                                 ));
-                                            self.show_success(&format!("Imported: {}", full_path));
                                         }
                                         Err(error) => {
                                             self.show_success(&format!("Import failed: {}", error));
