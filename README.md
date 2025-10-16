@@ -122,9 +122,6 @@ cargo build
 # Release build
 cargo build --release
 
-# Run tests
-cargo test
-
 # Run examples
 cargo run --example simple_loop
 ```
