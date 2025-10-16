@@ -221,6 +221,14 @@ impl LooperEngine {
 
     pub fn send_command(&self, command: LayerCommand) -> Result<(), Box<dyn std::error::Error>> {
         match command {
+            LayerCommand::SwitchInputDevice(_device_name) => {
+                // Notify UI; actual device switch is handled in the audio thread
+                self.send_event(AudioEvent::DeviceSwitchRequested);
+            }
+            LayerCommand::SwitchOutputDevice(_device_name) => {
+                // Notify UI; actual device switch is handled in the audio thread
+                self.send_event(AudioEvent::DeviceSwitchRequested);
+            }
             LayerCommand::Record(layer_id) => {
                 if layer_id >= self.config.max_layers {
                     return Err("Layer ID out of range".into());

@@ -272,6 +272,15 @@ impl TerminalUI {
             AudioEvent::Error(msg) => {
                 self.show_success(&format!("Error: {}", msg));
             }
+            AudioEvent::DeviceSwitchRequested => {
+                self.show_success("Switching audio devices...");
+            }
+            AudioEvent::DeviceSwitchComplete => {
+                self.show_success("Device switch complete!");
+            }
+            AudioEvent::DeviceSwitchFailed(msg) => {
+                self.show_success(&format!("Device switch failed: {}", msg));
+            }
             AudioEvent::DevicesUpdated(input, output) => {
                 match input {
                     Some(name) => self.input_device_name = name,
@@ -450,23 +459,26 @@ impl TerminalUI {
                         outputs,
                         column,
                         selected_index,
-                        scroll_offset,
+                        scroll_offset: _,
                     } => {
-                        // Apply current selection without closing overlay
-                        if column == 0 {
-                            if !inputs.is_empty() && selected_index < inputs.len() {
-                                self.input_device_name = inputs[selected_index].clone();
-                                self.show_success(&format!(
-                                    "Selected input: {} (restart to apply)",
-                                    self.input_device_name
-                                ));
-                            }
-                        } else if !outputs.is_empty() && selected_index < outputs.len() {
-                            self.output_device_name = outputs[selected_index].clone();
-                            self.show_success(&format!(
-                                "Selected output: {} (restart to apply)",
-                                self.output_device_name
-                            ));
+                        // Apply device change immediately
+                        if column == 0 && !inputs.is_empty() && selected_index < inputs.len() {
+                            let device_name = inputs[selected_index].clone();
+                            self.input_device_name = device_name.clone();
+                            let _ = self
+                                .command_sender
+                                .send(LayerCommand::SwitchInputDevice(device_name.clone()));
+                            self.show_success(&format!("Switching to input: {}...", device_name));
+                        } else if column == 1
+                            && !outputs.is_empty()
+                            && selected_index < outputs.len()
+                        {
+                            let device_name = outputs[selected_index].clone();
+                            self.output_device_name = device_name.clone();
+                            let _ = self
+                                .command_sender
+                                .send(LayerCommand::SwitchOutputDevice(device_name.clone()));
+                            self.show_success(&format!("Switching to output: {}...", device_name));
                         }
 
                         // Keep the picker open
@@ -475,7 +487,7 @@ impl TerminalUI {
                             outputs,
                             column,
                             selected_index,
-                            scroll_offset,
+                            scroll_offset: 0,
                         });
                         return Ok(());
                     }

@@ -58,7 +58,7 @@ cargo run --release -- --debug
 
 - Press `O` to open Options.
 - Use `Tab` to switch between Input and Output lists, `↑/↓` to navigate, and `Enter` to select.
-- Selections update the displayed device names; restart the app to apply device changes.
+- Selections apply immediately; audio briefly pauses while devices switch.
 
 ## Architecture
 

@@ -38,8 +38,10 @@ pub enum LayerCommand {
     Clear(usize),
     ClearAll,
     PlayAll,
-    ImportWav(usize, String), // layer_id, file_path
-    ExportWav(String),        // file_path
+    ImportWav(usize, String),   // layer_id, file_path
+    ExportWav(String),          // file_path
+    SwitchInputDevice(String),  // device_name
+    SwitchOutputDevice(String), // device_name
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -60,4 +62,7 @@ pub enum AudioEvent {
     WavExported(String),                            // file_path
     Error(String),                                  // error message
     DevicesUpdated(Option<String>, Option<String>), // (input_name, output_name)
+    DeviceSwitchRequested,
+    DeviceSwitchComplete,
+    DeviceSwitchFailed(String),
 }

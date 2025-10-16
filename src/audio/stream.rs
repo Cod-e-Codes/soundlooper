@@ -133,6 +133,101 @@ impl AudioStream {
         })
     }
 
+    // Create a new AudioStream with specific device names (or defaults)
+    pub fn new_with_devices(
+        _config: AudioConfig,
+        debug_mode: bool,
+        input_device_name: Option<String>,
+        output_device_name: Option<String>,
+    ) -> Result<Self> {
+        let host = cpal::default_host();
+
+        // Resolve input device
+        let input_device = if let Some(name) = input_device_name.clone() {
+            // Search devices by name
+            let mut found = None;
+            for device in host.input_devices()? {
+                if let Ok(device_name) = device.name()
+                    && device_name == name
+                {
+                    found = Some(device);
+                    break;
+                }
+            }
+            found.ok_or_else(|| anyhow!("Input device '{}' not found", name))?
+        } else {
+            host.default_input_device()
+                .ok_or_else(|| anyhow!("No input device available"))?
+        };
+
+        // Resolve output device
+        let output_device = if let Some(name) = output_device_name.clone() {
+            let mut found = None;
+            for device in host.output_devices()? {
+                if let Ok(device_name) = device.name()
+                    && device_name == name
+                {
+                    found = Some(device);
+                    break;
+                }
+            }
+            found.ok_or_else(|| anyhow!("Output device '{}' not found", name))?
+        } else {
+            host.default_output_device()
+                .ok_or_else(|| anyhow!("No output device available"))?
+        };
+
+        let input_default = input_device.default_input_config()?;
+        let output_default = output_device.default_output_config()?;
+
+        let input_device_name = input_device
+            .name()
+            .unwrap_or_else(|_| "Unknown".to_string());
+        let output_device_name = output_device
+            .name()
+            .unwrap_or_else(|_| "Unknown".to_string());
+
+        if debug_mode {
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("debug.log")
+                .map(|mut file| {
+                    use std::io::Write;
+                    let _ = writeln!(file, "═══ Device Switch ═══");
+                    let _ = writeln!(file, "Input: {}", input_device_name);
+                    let _ = writeln!(file, "Output: {}", output_device_name);
+                });
+        }
+
+        let input_config = StreamConfig {
+            channels: input_default.channels(),
+            sample_rate: input_default.sample_rate(),
+            buffer_size: cpal::BufferSize::Default,
+        };
+
+        let output_config = StreamConfig {
+            channels: output_default.channels(),
+            sample_rate: output_default.sample_rate(),
+            buffer_size: cpal::BufferSize::Default,
+        };
+
+        let resample_ratio =
+            output_default.sample_rate().0 as f64 / input_default.sample_rate().0 as f64;
+
+        Ok(Self {
+            host,
+            input_device,
+            output_device,
+            input_config,
+            output_config,
+            sample_format: output_default.sample_format(),
+            resample_ratio,
+            input_device_name,
+            output_device_name,
+        })
+    }
+
     pub fn start_audio_looper(
         &self,
         looper_engine: Arc<LooperEngine>,

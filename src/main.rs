@@ -2,7 +2,8 @@ use anyhow::Result;
 use crossbeam::channel;
 use soundlooper::audio::{AudioConfig, AudioEvent, AudioStream, LayerCommand, LooperEngine};
 use soundlooper::ui::TerminalUI;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 fn print_help() {
@@ -100,27 +101,111 @@ fn main() -> Result<()> {
     let input_device_name = audio_stream.get_input_device_name().to_string();
     let output_device_name = audio_stream.get_output_device_name().to_string();
 
+    // Prepare restart mechanism and shared device names
+    let restart_audio = Arc::new(AtomicBool::new(false));
+    let restart_audio_clone = Arc::clone(&restart_audio);
+
+    let current_input_device = Arc::new(Mutex::new(input_device_name.clone()));
+    let current_output_device = Arc::new(Mutex::new(output_device_name.clone()));
+
+    let input_device_clone = Arc::clone(&current_input_device);
+    let output_device_clone = Arc::clone(&current_output_device);
+
     // Start audio thread with the SAME looper engine
     let looper_clone = Arc::clone(&looper_engine);
 
     let _audio_thread = thread::spawn(move || {
-        if let Err(e) = run_audio_thread(
-            audio_stream,
-            looper_clone,
-            command_receiver,
-            event_sender,
-            debug_mode,
-        ) {
-            eprintln!("Audio thread error: {}", e);
+        loop {
+            // Read current desired device names
+            let input_name = input_device_clone.lock().unwrap().clone();
+            let output_name = output_device_clone.lock().unwrap().clone();
+
+            // Build a fresh stream with selected devices
+            let audio_stream = match AudioStream::new_with_devices(
+                runtime_config.clone(),
+                debug_mode,
+                Some(input_name.clone()),
+                Some(output_name.clone()),
+            ) {
+                Ok(stream) => stream,
+                Err(e) => {
+                    eprintln!("Failed to create audio stream: {}", e);
+                    let _ = event_sender.try_send(AudioEvent::DeviceSwitchFailed(format!(
+                        "Failed to switch devices: {}",
+                        e
+                    )));
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    continue;
+                }
+            };
+
+            // Inform UI
+            let _ = event_sender.try_send(AudioEvent::DevicesUpdated(
+                Some(audio_stream.get_input_device_name().to_string()),
+                Some(audio_stream.get_output_device_name().to_string()),
+            ));
+            let _ = event_sender.try_send(AudioEvent::DeviceSwitchComplete);
+
+            // Create a forwarding channel so we can intercept device switch commands
+            let (forward_tx, forward_rx) = channel::unbounded::<LayerCommand>();
+
+            // Forwarder thread: intercept switch commands to update device names and trigger restart
+            let restart_for_forwarder = Arc::clone(&restart_audio_clone);
+            let input_for_forwarder = Arc::clone(&input_device_clone);
+            let output_for_forwarder = Arc::clone(&output_device_clone);
+            let event_sender_for_forwarder = event_sender.clone();
+            let cmd_receiver_for_forwarder = command_receiver.clone();
+            let _forwarder = std::thread::spawn(move || {
+                while let Ok(cmd) = cmd_receiver_for_forwarder.recv() {
+                    match &cmd {
+                        LayerCommand::SwitchInputDevice(new_name) => {
+                            if let Ok(mut name) = input_for_forwarder.lock() {
+                                *name = new_name.clone();
+                            }
+                            let _ = event_sender_for_forwarder
+                                .try_send(AudioEvent::DeviceSwitchRequested);
+                            restart_for_forwarder.store(true, Ordering::Relaxed);
+                        }
+                        LayerCommand::SwitchOutputDevice(new_name) => {
+                            if let Ok(mut name) = output_for_forwarder.lock() {
+                                *name = new_name.clone();
+                            }
+                            let _ = event_sender_for_forwarder
+                                .try_send(AudioEvent::DeviceSwitchRequested);
+                            restart_for_forwarder.store(true, Ordering::Relaxed);
+                        }
+                        _ => {}
+                    }
+                    // Always forward the command to the looper engine
+                    if forward_tx.send(cmd).is_err() {
+                        break;
+                    }
+                    // If a restart was requested, exit to allow streams to be rebuilt
+                    if restart_for_forwarder.load(Ordering::Relaxed) {
+                        break;
+                    }
+                }
+            });
+
+            // Run the inner thread which owns the active streams
+            if let Err(e) = run_audio_thread_inner(
+                audio_stream,
+                Arc::clone(&looper_clone),
+                forward_rx,
+                event_sender.clone(),
+                debug_mode,
+                Arc::clone(&restart_audio_clone),
+            ) {
+                eprintln!("Audio thread error: {}", e);
+            }
+
+            // Exit if not restarting
+            if !restart_audio_clone.load(Ordering::Relaxed) {
+                break;
+            }
+            restart_audio_clone.store(false, Ordering::Relaxed);
             if debug_mode {
-                let _ = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("debug.log")
-                    .and_then(|mut file| {
-                        use std::io::Write;
-                        writeln!(file, "Audio thread error: {}", e)
-                    });
+                println!("Restarting audio with new devices...");
             }
         }
     });
@@ -141,14 +226,14 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn run_audio_thread(
+fn run_audio_thread_inner(
     audio_stream: AudioStream,
     looper_engine: Arc<LooperEngine>,
     command_receiver: channel::Receiver<LayerCommand>,
     event_sender: channel::Sender<AudioEvent>,
     debug_mode: bool,
+    restart_flag: Arc<AtomicBool>,
 ) -> Result<()> {
-    // Start audio streams with proper synchronization
     let (_input_stream, _output_stream) = audio_stream.start_audio_looper(
         looper_engine,
         command_receiver,
@@ -156,20 +241,12 @@ fn run_audio_thread(
         debug_mode,
     )?;
 
-    // Log that we're in the keep-alive loop (only in debug mode)
-    if debug_mode {
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("debug.log")
-            .and_then(|mut file| {
-                use std::io::Write;
-                writeln!(file, "Audio thread: Entering keep-alive loop")
-            });
-    }
-
-    // Keep both streams alive
+    // Keep streams alive and watch for restart
     loop {
-        thread::sleep(std::time::Duration::from_secs(1));
+        if restart_flag.load(Ordering::Relaxed) {
+            break;
+        }
+        thread::sleep(std::time::Duration::from_millis(100));
     }
+    Ok(())
 }
