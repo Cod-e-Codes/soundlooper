@@ -87,8 +87,15 @@ cargo build
 # Release build
 cargo build --release
 
-# Run examples
-cargo run --example simple_loop
+## Examples
+
+See the [examples/README.md](examples/README.md) for detailed examples and usage instructions.
+
+```bash
+cargo run --example basic_api           # Basic API usage
+cargo run --example record_playback     # Interactive recording workflow
+cargo run --example feature_demo        # Automated feature demonstration
+cargo run --example multi_layer_mix     # Advanced mixing workflow
 ```
 
 ## Requirements
@@ -96,39 +103,6 @@ cargo run --example simple_loop
 - Rust 1.89+
 - Audio input/output device
 - Terminal with UTF-8 support
-
-## Examples
-
-```rust
-use soundlooper::audio::{AudioConfig, LooperEngine, LayerCommand};
-
-// Create a looper engine
-let config = AudioConfig::default();
-let looper = LooperEngine::new(config);
-
-// Record on layer 0
-looper.send_command(LayerCommand::Record(0))?;
-
-// Stop recording (automatically starts playback if there's content)
-looper.send_command(LayerCommand::StopRecording(0))?;
-
-// Start playback manually
-looper.send_command(LayerCommand::Play(0))?;
-
-// Stop playback
-looper.send_command(LayerCommand::StopPlaying(0))?;
-
-// Stop all layers
-looper.send_command(LayerCommand::StopAll)?;
-
-// Clear the layer
-looper.send_command(LayerCommand::Clear(0))?;
-```
-
-Run the complete example:
-```bash
-cargo run --example simple_loop
-```
 
 ## Dependencies
 

@@ -354,12 +354,17 @@ impl LooperEngine {
     }
 
     fn process_commands(&self) {
-        // Process commands from UI thread
-        if let Ok(receiver) = self.command_receiver.lock()
-            && let Some(ref cmd_receiver) = *receiver
-        {
+        // FIX: Use try_lock to avoid blocking the audio thread
+        // If we can't get the lock immediately, skip this cycle - we'll get it next time
+        let receiver_opt = match self.command_receiver.try_lock() {
+            Ok(guard) => guard.clone(),
+            Err(_) => return, // Can't get lock, skip this cycle
+        };
+
+        if let Some(ref cmd_receiver) = receiver_opt {
+            // Collect all available commands without holding any locks
             let mut commands = Vec::new();
-            let debug_mode = self.debug_mode.lock().map(|d| *d).unwrap_or(false);
+            let debug_mode = self.debug_mode.try_lock().map(|d| *d).unwrap_or(false);
             while let Ok(command) = cmd_receiver.try_recv() {
                 if debug_mode {
                     let _ = std::fs::OpenOptions::new()
@@ -374,34 +379,17 @@ impl LooperEngine {
                 commands.push(command);
             }
 
-            // Drop the lock before processing commands
-            drop(receiver);
-
-            // Process all commands
+            // Process all commands (locks are released above)
             for command in commands {
                 if let Err(e) = self.send_command(command) {
                     eprintln!("Command processing error: {}", e);
                 }
             }
-        } else {
-            // Log when we can't get the receiver (only in debug mode)
-            if let Ok(debug_mode) = self.debug_mode.lock()
-                && *debug_mode
-            {
-                let _ = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("debug.log")
-                    .and_then(|mut file| {
-                        use std::io::Write;
-                        writeln!(file, "process_commands: Could not get receiver")
-                    });
-            }
         }
     }
 
     fn send_event(&self, event: AudioEvent) {
-        if let Ok(sender) = self.event_sender.lock()
+        if let Ok(sender) = self.event_sender.try_lock()
             && let Some(ref evt_sender) = *sender
         {
             let _ = evt_sender.try_send(event);
