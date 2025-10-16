@@ -1539,6 +1539,49 @@ impl TerminalUI {
                 };
                 let mute_solo_cell = Cell::from(mute_solo_text);
 
+                // Peak meter cell
+                let peak_level = layer.meter.get_peak();
+                let peak_db = crate::audio::peak_meter::PeakMeter::to_db(peak_level);
+                let peak_color = match crate::audio::peak_meter::PeakMeter::get_color(peak_level) {
+                    crate::audio::peak_meter::MeterColor::Normal => Color::Green,
+                    crate::audio::peak_meter::MeterColor::Warn => Color::Yellow,
+                    crate::audio::peak_meter::MeterColor::Hot => Color::Red,
+                    crate::audio::peak_meter::MeterColor::Clip => Color::Magenta,
+                };
+
+                let peak_text = if peak_level > 0.001 {
+                    format!("{:.1}dB", peak_db)
+                } else {
+                    "-∞".to_string()
+                };
+                let peak_cell = Cell::from(Span::styled(
+                    peak_text,
+                    Style::default().fg(peak_color).add_modifier(Modifier::BOLD),
+                ));
+
+                // Peak hold cell
+                let peak_hold_level = layer.meter.get_peak_hold();
+                let peak_hold_db = crate::audio::peak_meter::PeakMeter::to_db(peak_hold_level);
+                let peak_hold_color =
+                    match crate::audio::peak_meter::PeakMeter::get_color(peak_hold_level) {
+                        crate::audio::peak_meter::MeterColor::Normal => Color::Green,
+                        crate::audio::peak_meter::MeterColor::Warn => Color::Yellow,
+                        crate::audio::peak_meter::MeterColor::Hot => Color::Red,
+                        crate::audio::peak_meter::MeterColor::Clip => Color::Magenta,
+                    };
+
+                let peak_hold_text = if peak_hold_level > 0.001 {
+                    format!("{:.1}dB", peak_hold_db)
+                } else {
+                    "-∞".to_string()
+                };
+                let peak_hold_cell = Cell::from(Span::styled(
+                    peak_hold_text,
+                    Style::default()
+                        .fg(peak_hold_color)
+                        .add_modifier(Modifier::BOLD),
+                ));
+
                 // Determine row style based on selection
                 let row_style = if i == selected_layer {
                     Style::default()
@@ -1554,6 +1597,8 @@ impl TerminalUI {
                     volume_cell,
                     samples_cell,
                     mute_solo_cell,
+                    peak_cell,
+                    peak_hold_cell,
                 ])
                 .style(row_style)
             })
@@ -1568,6 +1613,8 @@ impl TerminalUI {
                 Constraint::Length(8),  // Volume
                 Constraint::Length(10), // Samples
                 Constraint::Length(10), // Mute/Solo
+                Constraint::Length(10), // Peak
+                Constraint::Length(10), // Peak Hold
             ],
         )
         .header(Row::new(vec![
@@ -1592,6 +1639,16 @@ impl TerminalUI {
                     .add_modifier(Modifier::BOLD),
             ),
             Cell::from("Mute/Solo").style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Cell::from("Peak").style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Cell::from("Hold").style(
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),

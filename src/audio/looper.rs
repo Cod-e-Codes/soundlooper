@@ -1,7 +1,9 @@
 use crossbeam::channel::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
-use super::{AudioConfig, AudioEvent, AudioLayer, LayerCommand, SharedLockFreeBuffer, TempoEngine};
+use super::{
+    AudioConfig, AudioEvent, AudioLayer, LayerCommand, SharedLockFreeBuffer, SimdMixer, TempoEngine,
+};
 // use super::io::import_wav;
 
 pub struct LooperEngine {
@@ -26,6 +28,8 @@ pub struct LooperEngine {
     metronome_playhead: Arc<Mutex<Option<usize>>>,
     // Count-in mode
     count_in_mode: Arc<Mutex<bool>>,
+    // SIMD mixer
+    simd_mixer: Arc<Mutex<SimdMixer>>,
 }
 
 impl LooperEngine {
@@ -54,6 +58,7 @@ impl LooperEngine {
             metronome_sample: Arc::new(Mutex::new(Vec::new())),
             metronome_playhead: Arc::new(Mutex::new(None)),
             count_in_mode: Arc::new(Mutex::new(false)),
+            simd_mixer: Arc::new(Mutex::new(SimdMixer::new(config.buffer_size * 2))),
         }
     }
 
@@ -113,9 +118,13 @@ impl LooperEngine {
             }
         }
 
-        // Mix all layers directly to output (no intermediate buffer!)
-        output.fill(0.0);
-        Self::mix_layers_static(&self.layers, output);
+        // Mix all layers using SIMD acceleration
+        if let Ok(mut mixer) = self.simd_mixer.try_lock() {
+            mixer.mix_layers(&self.layers, output);
+        } else {
+            // Fallback to scalar mixing if SIMD mixer is locked
+            Self::mix_layers_static(&self.layers, output);
+        }
 
         // Mix metronome if active
         self.mix_metronome(output);

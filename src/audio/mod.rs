@@ -2,6 +2,8 @@ pub mod io;
 pub mod layer;
 pub mod lockfree_buffer;
 pub mod looper;
+pub mod peak_meter;
+pub mod simd_mixer;
 pub mod stream;
 pub mod tempo;
 
@@ -9,6 +11,8 @@ pub use io::{export_wav, import_wav};
 pub use layer::AudioLayer;
 pub use lockfree_buffer::{AudioBufferPair, LockFreeAudioBuffer, SharedLockFreeBuffer};
 pub use looper::LooperEngine;
+pub use peak_meter::{MeterColor, PeakMeter};
+pub use simd_mixer::{ScalarMixer, SimdMixer};
 pub use stream::AudioStream;
 pub use tempo::TempoEngine;
 

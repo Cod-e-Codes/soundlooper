@@ -11,6 +11,7 @@ pub struct AudioLayer {
     pub loop_start: usize,
     pub loop_end: usize,
     pub previous_buffer: Option<Vec<f32>>,
+    pub meter: crate::audio::peak_meter::PeakMeter,
 }
 
 impl AudioLayer {
@@ -27,6 +28,7 @@ impl AudioLayer {
             loop_start: 0,
             loop_end: 0,
             previous_buffer: None,
+            meter: crate::audio::peak_meter::PeakMeter::new(),
         }
     }
 
@@ -109,6 +111,9 @@ impl AudioLayer {
             self.playback_position += 1;
         }
 
+        // Update peak meter
+        self.meter.update(&output);
+
         output
     }
 
@@ -143,6 +148,7 @@ impl AudioLayer {
         self.loop_start = 0;
         self.loop_end = 0;
         self.previous_buffer = None;
+        self.meter.reset();
     }
 
     pub fn is_empty(&self) -> bool {
