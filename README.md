@@ -12,7 +12,7 @@ A real-time multi-layer audio looper built in Rust with a terminal UI. Record, m
 - **WAV Import/Export**: Import WAV files into layers and export compositions
 - **Terminal UI**: Clean, responsive TUI with device information display
 - **Cross-platform**: Works on Windows, macOS, and Linux
-- **Debug Mode**: Optional debug logging with `--debug` flag
+- **Debug Mode**: Optional debug logging with `--debug` flag. Debug logs are written to debug.log in the current directory
 
 ## Quick Start
 
@@ -128,7 +128,7 @@ cargo run --example simple_loop
 
 ## Requirements
 
-- Rust 1.70+
+- Rust 1.89+
 - Audio input/output device
 - Terminal with UTF-8 support
 
