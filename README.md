@@ -18,7 +18,7 @@ A real-time multi-layer audio looper built in Rust with a terminal UI. Record, m
 
 ```bash
 # Clone and build
-git clone <repository-url>
+git clone https://github.com/Cod-e-Codes/soundlooper.git
 cd soundlooper
 cargo build --release
 
