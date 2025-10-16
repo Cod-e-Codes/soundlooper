@@ -62,19 +62,6 @@ cargo run --release -- --debug
 | `N` | Toggle metronome |
 | `Q` | Quit |
 
-### Options (Device Selection)
-
-- Press `O` to open Options.
-- Use `Tab` to switch between Input and Output lists, `↑/↓` to navigate, and `Enter` to select.
-- Selections apply immediately; audio briefly pauses while devices switch.
-
-### Tempo & Sync
-
-- Beat Sync (G): aligns starts/stops/records to measure boundaries.
-- Count‑In Mode (H): when enabled, recording uses a 3‑2‑1 count‑in and starts on the next measure.
-- Tap Tempo (B) or Set BPM (T): updates tempo in real time.
-- Metronome (N): toggles a click sound on each beat.
-
 ## Architecture
 
 The application is built with a modular architecture:
@@ -87,8 +74,28 @@ The application is built with a modular architecture:
 
 - `AudioLayer`: Individual audio layer with recording, playback, and control capabilities
 - `LooperEngine`: Manages all layers and handles real-time mixing
+- `TempoEngine`: BPM tracking, beat synchronization, and count-in functionality
 - `AudioStream`: CPAL-based audio input/output handling with resampling
 - `TerminalUI`: Terminal-based user interface
+
+## Building
+
+```bash
+# Debug build
+cargo build
+
+# Release build
+cargo build --release
+
+# Run examples
+cargo run --example simple_loop
+```
+
+## Requirements
+
+- Rust 1.89+
+- Audio input/output device
+- Terminal with UTF-8 support
 
 ## Examples
 
@@ -135,25 +142,6 @@ cargo run --example simple_loop
 - `ringbuf` - Lock-free ring buffer
 - `serde` - Serialization framework
 - `toml` - TOML configuration parsing
-
-## Building
-
-```bash
-# Debug build
-cargo build
-
-# Release build
-cargo build --release
-
-# Run examples
-cargo run --example simple_loop
-```
-
-## Requirements
-
-- Rust 1.89+
-- Audio input/output device
-- Terminal with UTF-8 support
 
 ## Contributing
 

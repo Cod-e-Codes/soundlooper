@@ -120,61 +120,42 @@ impl LooperEngine {
             output.copy_from_slice(&output_buf);
         }
 
-        // Advance tempo and run scheduled actions on measure/beat boundaries
-        let processed_samples = input.len();
-        let (
-            crossed_measure,
-            crossed_beat,
-            curr_measure,
-            curr_beat,
-            count_in_active,
-            count_in_remaining,
-            count_in_layer,
-        ) = {
-            if let Ok(mut tempo) = self.tempo.lock() {
-                let prev_measure = tempo.get_current_measure();
-                let prev_beat = tempo.get_current_beat();
-                tempo.advance(processed_samples);
-                let curr_measure = tempo.get_current_measure();
-                let curr_beat = tempo.get_current_beat();
-                (
-                    curr_measure != prev_measure,
-                    curr_beat != prev_beat,
-                    curr_measure,
-                    curr_beat,
-                    tempo.count_in_active,
-                    tempo.count_in_remaining_beats,
-                    tempo.count_in_layer,
-                )
-            } else {
-                (false, false, 0, 1, false, 0, None)
+        // Only process tempo if beat sync or metronome is enabled
+        let beat_sync_enabled = self.beat_sync_enabled.lock().map(|b| *b).unwrap_or(false);
+        let metronome_enabled = self.metronome_enabled.lock().map(|b| *b).unwrap_or(false);
+
+        if beat_sync_enabled || metronome_enabled {
+            let processed_samples = input.len();
+            let (crossed_measure, crossed_beat) = {
+                if let Ok(mut tempo) = self.tempo.lock() {
+                    let prev_measure = tempo.get_current_measure();
+                    let prev_beat = tempo.get_current_beat();
+                    tempo.advance(processed_samples);
+                    let curr_measure = tempo.get_current_measure();
+                    let curr_beat = tempo.get_current_beat();
+                    (curr_measure != prev_measure, curr_beat != prev_beat)
+                } else {
+                    (false, false)
+                }
+            };
+
+            if crossed_measure {
+                self.run_scheduled_actions();
             }
-        };
 
-        // Emit beat event
-        let _ = self
-            .event_sender
-            .lock()
-            .ok()
-            .and_then(|s| s.as_ref().cloned())
-            .map(|sender| {
-                let _ = sender.try_send(AudioEvent::Beat(curr_beat, curr_measure));
-            });
-
-        if crossed_measure {
-            self.run_scheduled_actions();
-        }
-
-        if crossed_beat {
-            self.trigger_metronome_click();
-            if count_in_active
-                && count_in_remaining > 0
-                && let Some(layer_id) = count_in_layer
-            {
-                self.send_event(AudioEvent::CountInTick {
-                    layer_id,
-                    remaining_beats: count_in_remaining,
-                });
+            if crossed_beat {
+                self.trigger_metronome_click();
+                // Only emit count-in events when needed to reduce audio thread overhead
+                if let Ok(tempo) = self.tempo.lock()
+                    && tempo.count_in_active
+                    && tempo.count_in_remaining_beats > 0
+                    && let Some(layer_id) = tempo.count_in_layer
+                {
+                    self.send_event(AudioEvent::CountInTick {
+                        layer_id,
+                        remaining_beats: tempo.count_in_remaining_beats,
+                    });
+                }
             }
         }
 

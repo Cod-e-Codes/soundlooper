@@ -147,14 +147,14 @@ impl TerminalUI {
             }
 
             // Small sleep to prevent excessive CPU usage
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(Duration::from_millis(1));
         }
 
         Ok(())
     }
 
     fn process_events(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        if event::poll(Duration::from_millis(1))?
+        if event::poll(Duration::from_millis(0))?
             && let Event::Key(key) = event::read()?
         {
             // Process key presses
@@ -1002,18 +1002,6 @@ impl TerminalUI {
 
     fn validate_export_path(&self, file_path: &str) -> Result<(), String> {
         let path = std::path::Path::new(file_path);
-
-        // Check if parent directory exists and is writable
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                return Err("Directory does not exist".to_string());
-            }
-            if !parent.is_dir() {
-                return Err("Parent path is not a directory".to_string());
-            }
-        } else {
-            return Err("Invalid file path".to_string());
-        }
 
         // Check file extension
         if let Some(extension) = path.extension() {
