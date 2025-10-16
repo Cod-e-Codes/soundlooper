@@ -12,6 +12,9 @@ A real-time multi-layer audio looper built in Rust with a terminal UI. Record, m
 - **WAV Import/Export**: Import WAV files into layers and export compositions
 - **Terminal UI**: Clean, responsive TUI with device information display
 - **Options Panel**: Choose input/output audio devices directly from the TUI
+- **Beat Sync & Count‑In Mode**: Start/stop/record aligned to measures; optional 3‑2‑1 count‑in
+- **Tap Tempo & BPM**: Tap to detect BPM or set BPM numerically
+- **Metronome**: Click at each beat, synced to BPM
 - **Cross-platform**: Works on Windows, macOS, and Linux
 - **Debug Mode**: Optional debug logging with `--debug` flag (logs written to `debug.log`)
 
@@ -38,7 +41,7 @@ cargo run --release -- --debug
 | Key | Action |
 |-----|--------|
 | `↑↓` | Select layer |
-| `1-9`, `0` | Record/Stop/Play layer 1-10 |
+| `1-9`, `0` | Record/Stop/Play layer 1-10 (beat‑sync aware) |
 | `R` | Record on selected layer |
 | `S` | Stop selected layer |
 | `Space` | Stop all layers |
@@ -52,6 +55,11 @@ cargo run --release -- --debug
 | `I` | Import WAV file to selected layer |
 | `E` | Export composition as WAV |
 | `O` | Options (select input/output devices) |
+| `B` | Tap tempo |
+| `T` | Set BPM |
+| `G` | Toggle beat sync |
+| `H` | Toggle count‑in mode |
+| `N` | Toggle metronome |
 | `Q` | Quit |
 
 ### Options (Device Selection)
@@ -59,6 +67,13 @@ cargo run --release -- --debug
 - Press `O` to open Options.
 - Use `Tab` to switch between Input and Output lists, `↑/↓` to navigate, and `Enter` to select.
 - Selections apply immediately; audio briefly pauses while devices switch.
+
+### Tempo & Sync
+
+- Beat Sync (G): aligns starts/stops/records to measure boundaries.
+- Count‑In Mode (H): when enabled, recording uses a 3‑2‑1 count‑in and starts on the next measure.
+- Tap Tempo (B) or Set BPM (T): updates tempo in real time.
+- Metronome (N): toggles a click sound on each beat.
 
 ## Architecture
 

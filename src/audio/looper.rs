@@ -1,7 +1,8 @@
 use crossbeam::channel::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
-use super::{AudioConfig, AudioEvent, AudioLayer, LayerCommand};
+use super::{AudioConfig, AudioEvent, AudioLayer, LayerCommand, TempoEngine};
+// use super::io::import_wav;
 
 pub struct LooperEngine {
     layers: Arc<Vec<Arc<Mutex<AudioLayer>>>>,
@@ -14,6 +15,18 @@ pub struct LooperEngine {
     command_receiver: Arc<Mutex<Option<Receiver<LayerCommand>>>>,
     event_sender: Arc<Mutex<Option<Sender<AudioEvent>>>>,
     debug_mode: Arc<Mutex<bool>>,
+    // Tempo / sync
+    tempo: Arc<Mutex<TempoEngine>>,
+    beat_sync_enabled: Arc<Mutex<bool>>,
+    pending_play: Arc<Mutex<Vec<usize>>>,
+    pending_stop: Arc<Mutex<Vec<usize>>>,
+    pending_record: Arc<Mutex<Option<usize>>>,
+    // Metronome
+    metronome_enabled: Arc<Mutex<bool>>,
+    metronome_sample: Arc<Mutex<Vec<f32>>>,
+    metronome_playhead: Arc<Mutex<Option<usize>>>,
+    // Count-in mode
+    count_in_mode: Arc<Mutex<bool>>,
 }
 
 impl LooperEngine {
@@ -34,6 +47,21 @@ impl LooperEngine {
             command_receiver: Arc::new(Mutex::new(None)),
             event_sender: Arc::new(Mutex::new(None)),
             debug_mode: Arc::new(Mutex::new(false)),
+            tempo: Arc::new(Mutex::new(TempoEngine::new(config.sample_rate, 120.0, 4))),
+            beat_sync_enabled: Arc::new(Mutex::new(true)),
+            pending_play: Arc::new(Mutex::new(Vec::new())),
+            pending_stop: Arc::new(Mutex::new(Vec::new())),
+            pending_record: Arc::new(Mutex::new(None)),
+            metronome_enabled: Arc::new(Mutex::new(false)),
+            metronome_sample: Arc::new(Mutex::new(Vec::new())),
+            metronome_playhead: Arc::new(Mutex::new(None)),
+            count_in_mode: Arc::new(Mutex::new(false)),
+        }
+    }
+
+    pub fn set_metronome_sample(&self, samples: Vec<f32>) {
+        if let Ok(mut buf) = self.metronome_sample.lock() {
+            *buf = samples;
         }
     }
 
@@ -85,8 +113,69 @@ impl LooperEngine {
             output_buf.fill(0.0);
             Self::mix_layers_static(&self.layers, &mut output_buf);
 
+            // Mix metronome if active
+            self.mix_metronome(&mut output_buf);
+
             // Copy to final output
             output.copy_from_slice(&output_buf);
+        }
+
+        // Advance tempo and run scheduled actions on measure/beat boundaries
+        let processed_samples = input.len();
+        let (
+            crossed_measure,
+            crossed_beat,
+            curr_measure,
+            curr_beat,
+            count_in_active,
+            count_in_remaining,
+            count_in_layer,
+        ) = {
+            if let Ok(mut tempo) = self.tempo.lock() {
+                let prev_measure = tempo.get_current_measure();
+                let prev_beat = tempo.get_current_beat();
+                tempo.advance(processed_samples);
+                let curr_measure = tempo.get_current_measure();
+                let curr_beat = tempo.get_current_beat();
+                (
+                    curr_measure != prev_measure,
+                    curr_beat != prev_beat,
+                    curr_measure,
+                    curr_beat,
+                    tempo.count_in_active,
+                    tempo.count_in_remaining_beats,
+                    tempo.count_in_layer,
+                )
+            } else {
+                (false, false, 0, 1, false, 0, None)
+            }
+        };
+
+        // Emit beat event
+        let _ = self
+            .event_sender
+            .lock()
+            .ok()
+            .and_then(|s| s.as_ref().cloned())
+            .map(|sender| {
+                let _ = sender.try_send(AudioEvent::Beat(curr_beat, curr_measure));
+            });
+
+        if crossed_measure {
+            self.run_scheduled_actions();
+        }
+
+        if crossed_beat {
+            self.trigger_metronome_click();
+            if count_in_active
+                && count_in_remaining > 0
+                && let Some(layer_id) = count_in_layer
+            {
+                self.send_event(AudioEvent::CountInTick {
+                    layer_id,
+                    remaining_beats: count_in_remaining,
+                });
+            }
         }
 
         // Check if we need to set master loop length
@@ -100,6 +189,115 @@ impl LooperEngine {
         {
             // This is the first layer recording, set it as master
             *master_len = Some(layer.buffer.len());
+        }
+    }
+
+    fn trigger_metronome_click(&self) {
+        if let Ok(enabled) = self.metronome_enabled.lock()
+            && *enabled
+        {
+            let mut playhead = self.metronome_playhead.lock().unwrap();
+            *playhead = Some(0);
+        }
+    }
+
+    fn mix_metronome(&self, output_buf: &mut [f32]) {
+        let enabled = self.metronome_enabled.lock().map(|b| *b).unwrap_or(false);
+        if !enabled {
+            return;
+        }
+        let mut playhead_lock = self.metronome_playhead.lock().unwrap();
+        let Some(mut playhead) = *playhead_lock else {
+            return;
+        };
+        let sample = self.metronome_sample.lock().unwrap();
+        if sample.is_empty() {
+            *playhead_lock = None;
+            return;
+        }
+        let remaining = sample.len().saturating_sub(playhead);
+        if remaining == 0 {
+            *playhead_lock = None;
+            return;
+        }
+
+        let to_mix = remaining.min(output_buf.len());
+        for i in 0..to_mix {
+            output_buf[i] = (output_buf[i] + sample[playhead + i]).clamp(-1.0, 1.0);
+        }
+        playhead += to_mix;
+        if playhead >= sample.len() {
+            *playhead_lock = None;
+        } else {
+            *playhead_lock = Some(playhead);
+        }
+    }
+
+    fn run_scheduled_actions(&self) {
+        // Count-in complete: only auto-start recording if count-in mode is enabled
+        if let Ok(mut tempo) = self.tempo.lock()
+            && !tempo.count_in_active
+            && tempo.count_in_layer.is_some()
+            && tempo.count_in_remaining_beats == 0
+            && let Some(layer_id) = tempo.count_in_layer.take()
+        {
+            self.send_event(AudioEvent::CountInFinished { layer_id });
+            let start_on_boundary = self.count_in_mode.lock().map(|g| *g).unwrap_or(false);
+            if start_on_boundary && let Ok(mut layer) = self.layers[layer_id].lock() {
+                layer.start_recording();
+                {
+                    let mut recording_layer = self.recording_layer.lock().unwrap();
+                    *recording_layer = Some(layer_id);
+                }
+                {
+                    let mut is_recording = self.is_recording.lock().unwrap();
+                    *is_recording = true;
+                }
+                self.send_event(AudioEvent::LayerRecording(layer_id));
+            }
+        }
+
+        // Play actions
+        if let Ok(mut to_play) = self.pending_play.lock() {
+            let layers_to_play: Vec<usize> = to_play.drain(..).collect();
+            drop(to_play);
+            for layer_id in layers_to_play {
+                if let Ok(mut layer) = self.layers[layer_id].lock()
+                    && !layer.buffer.is_empty()
+                {
+                    layer.start_playing();
+                    self.send_event(AudioEvent::LayerPlaying(layer_id));
+                }
+            }
+        }
+
+        // Stop actions
+        if let Ok(mut to_stop) = self.pending_stop.lock() {
+            let layers_to_stop: Vec<usize> = to_stop.drain(..).collect();
+            drop(to_stop);
+            for layer_id in layers_to_stop {
+                if let Ok(mut layer) = self.layers[layer_id].lock() {
+                    layer.stop_playing();
+                    self.send_event(AudioEvent::LayerStopped(layer_id));
+                }
+            }
+        }
+
+        // Record action (without count-in)
+        if let Ok(mut pending_rec) = self.pending_record.lock()
+            && let Some(layer_id) = pending_rec.take()
+            && let Ok(mut layer) = self.layers[layer_id].lock()
+        {
+            layer.start_recording();
+            {
+                let mut recording_layer = self.recording_layer.lock().unwrap();
+                *recording_layer = Some(layer_id);
+            }
+            {
+                let mut is_recording = self.is_recording.lock().unwrap();
+                *is_recording = true;
+            }
+            self.send_event(AudioEvent::LayerRecording(layer_id));
         }
     }
 
@@ -440,6 +638,99 @@ impl LooperEngine {
                         self.send_event(AudioEvent::Error(format!("Failed to export WAV: {}", e)));
                     }
                 }
+            }
+            // Tempo / Sync controls
+            LayerCommand::TapTempo => {
+                if let Ok(mut t) = self.tempo.lock() {
+                    t.tap_tempo();
+                    let bpm = t.bpm;
+                    self.send_event(AudioEvent::BpmChanged(bpm));
+                }
+            }
+            LayerCommand::SetBpm(bpm) => {
+                if let Ok(mut t) = self.tempo.lock() {
+                    t.set_bpm(bpm);
+                    let bpm = t.bpm;
+                    self.send_event(AudioEvent::BpmChanged(bpm));
+                }
+            }
+            LayerCommand::ToggleBeatSync(enabled) => {
+                if let Ok(mut flag) = self.beat_sync_enabled.lock() {
+                    *flag = enabled;
+                }
+            }
+            LayerCommand::ToggleCountInMode(enabled) => {
+                if let Ok(mut flag) = self.count_in_mode.lock() {
+                    *flag = enabled;
+                }
+                self.send_event(AudioEvent::CountInModeToggled(enabled));
+            }
+            LayerCommand::StartCountIn { layer_id, measures } => {
+                if let Ok(mut t) = self.tempo.lock() {
+                    let beats = measures.saturating_mul(t.beats_per_measure);
+                    t.start_count_in(layer_id, beats);
+                    self.send_event(AudioEvent::CountInStarted { layer_id, beats });
+                }
+            }
+            LayerCommand::SyncPlay(layer_id) => {
+                let sync = self.beat_sync_enabled.lock().map(|b| *b).unwrap_or(true);
+                if sync {
+                    if let Ok(mut v) = self.pending_play.lock() {
+                        v.push(layer_id);
+                    }
+                } else if let Ok(mut layer) = self.layers[layer_id].lock() {
+                    layer.start_playing();
+                    self.send_event(AudioEvent::LayerPlaying(layer_id));
+                }
+            }
+            LayerCommand::SyncStop(layer_id) => {
+                let sync = self.beat_sync_enabled.lock().map(|b| *b).unwrap_or(true);
+                if sync {
+                    if let Ok(mut v) = self.pending_stop.lock() {
+                        v.push(layer_id);
+                    }
+                } else if let Ok(mut layer) = self.layers[layer_id].lock() {
+                    layer.stop_playing();
+                    self.send_event(AudioEvent::LayerStopped(layer_id));
+                }
+            }
+            LayerCommand::SyncRecord(layer_id) => {
+                let sync = self.beat_sync_enabled.lock().map(|b| *b).unwrap_or(true);
+                if sync {
+                    let count_in_on = self.count_in_mode.lock().map(|b| *b).unwrap_or(false);
+                    if count_in_on {
+                        // Count-in enabled: start a count-in for one measure, then (optionally) auto-start when finished (handled above)
+                        if let Ok(mut t) = self.tempo.lock()
+                            && !t.count_in_active
+                        {
+                            let beats = t.beats_per_measure;
+                            t.start_count_in(layer_id, beats);
+                            self.send_event(AudioEvent::CountInStarted { layer_id, beats });
+                        }
+                    } else {
+                        // Count-in disabled: schedule recording to start at next measure boundary
+                        if let Ok(mut pending_rec) = self.pending_record.lock() {
+                            *pending_rec = Some(layer_id);
+                        }
+                    }
+                } else if let Ok(mut layer) = self.layers[layer_id].lock() {
+                    layer.start_recording();
+                    {
+                        let mut recording_layer = self.recording_layer.lock().unwrap();
+                        *recording_layer = Some(layer_id);
+                    }
+                    {
+                        let mut is_recording = self.is_recording.lock().unwrap();
+                        *is_recording = true;
+                    }
+                    self.send_event(AudioEvent::LayerRecording(layer_id));
+                }
+            }
+            LayerCommand::ToggleMetronome(enabled) => {
+                if let Ok(mut flag) = self.metronome_enabled.lock() {
+                    *flag = enabled;
+                }
+                self.send_event(AudioEvent::MetronomeToggled(enabled));
             }
         }
         Ok(())

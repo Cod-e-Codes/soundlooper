@@ -2,11 +2,13 @@ pub mod io;
 pub mod layer;
 pub mod looper;
 pub mod stream;
+pub mod tempo;
 
 pub use io::{export_wav, import_wav};
 pub use layer::AudioLayer;
 pub use looper::LooperEngine;
 pub use stream::AudioStream;
+pub use tempo::TempoEngine;
 
 #[derive(Debug, Clone)]
 pub struct AudioConfig {
@@ -42,6 +44,17 @@ pub enum LayerCommand {
     ExportWav(String),          // file_path
     SwitchInputDevice(String),  // device_name
     SwitchOutputDevice(String), // device_name
+    // Tempo / Sync controls
+    TapTempo,
+    SetBpm(f64),
+    ToggleBeatSync(bool),
+    ToggleCountInMode(bool),
+    StartCountIn { layer_id: usize, measures: u32 },
+    SyncPlay(usize),
+    SyncStop(usize),
+    SyncRecord(usize),
+    // Metronome
+    ToggleMetronome(bool),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -65,4 +78,21 @@ pub enum AudioEvent {
     DeviceSwitchRequested,
     DeviceSwitchComplete,
     DeviceSwitchFailed(String),
+    // Tempo / Sync updates
+    BpmChanged(f64),
+    Beat(u32, usize), // (beat, measure)
+    CountInStarted {
+        layer_id: usize,
+        beats: u32,
+    },
+    CountInFinished {
+        layer_id: usize,
+    },
+    CountInTick {
+        layer_id: usize,
+        remaining_beats: u32,
+    },
+    CountInModeToggled(bool),
+    // Metronome
+    MetronomeToggled(bool),
 }

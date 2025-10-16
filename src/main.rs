@@ -91,6 +91,15 @@ fn main() -> Result<()> {
 
     // Create looper engine (now thread-safe) with the ACTUAL processing sample rate
     let looper_engine = Arc::new(LooperEngine::new(runtime_config.clone()));
+    // Load metronome asset once at startup (resampled to engine rate)
+    match soundlooper::audio::import_wav("assets/metronome.wav", runtime_config.sample_rate) {
+        Ok(samples) => {
+            looper_engine.set_metronome_sample(samples);
+        }
+        Err(e) => {
+            eprintln!("Warning: failed to load metronome.wav: {}", e);
+        }
+    }
     let layers = looper_engine.get_layers();
 
     // Create communication channels

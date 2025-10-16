@@ -31,6 +31,7 @@ enum InputMode {
         scroll_offset: usize,
     },
     ExportWav,
+    SetBpm,
     DevicePicker {
         inputs: Vec<String>,
         outputs: Vec<String>,
@@ -74,6 +75,14 @@ pub struct TerminalUI {
     status_timer: Option<Instant>,
     // File picker overlay
     file_picker_overlay: bool,
+    // Tempo/Sync state
+    beat_sync_enabled: bool,
+    bpm_display: f64,
+    current_beat: u32,
+    current_measure: usize,
+    metronome_enabled: bool,
+    count_in_mode_enabled: bool,
+    count_in_remaining: Option<(usize, u32)>,
 }
 
 impl TerminalUI {
@@ -112,6 +121,14 @@ impl TerminalUI {
             status_timer: None,
             // File picker overlay
             file_picker_overlay: false,
+            // Tempo/Sync state
+            beat_sync_enabled: true,
+            bpm_display: 120.0,
+            current_beat: 1,
+            current_measure: 0,
+            metronome_enabled: false,
+            count_in_mode_enabled: false,
+            count_in_remaining: None,
         })
     }
 
@@ -165,43 +182,106 @@ impl TerminalUI {
             KeyCode::Char('q') => {
                 self.is_running = false;
             }
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                // Toggle metronome
+                self.metronome_enabled = !self.metronome_enabled;
+                let new_state = self.metronome_enabled;
+                let _ = self
+                    .command_sender
+                    .send(LayerCommand::ToggleMetronome(new_state));
+                self.show_success(if new_state {
+                    "Metronome ON"
+                } else {
+                    "Metronome OFF"
+                });
+            }
+            KeyCode::Char('b') | KeyCode::Char('B') => {
+                let _ = self.command_sender.send(LayerCommand::TapTempo);
+            }
+            KeyCode::Char('t') | KeyCode::Char('T') => {
+                self.start_input_mode(InputMode::SetBpm, "Set BPM: ");
+            }
+            KeyCode::Char('g') | KeyCode::Char('G') => {
+                self.beat_sync_enabled = !self.beat_sync_enabled;
+                let _ = self
+                    .command_sender
+                    .send(LayerCommand::ToggleBeatSync(self.beat_sync_enabled));
+                self.show_success(if self.beat_sync_enabled {
+                    "Beat Sync ON"
+                } else {
+                    "Beat Sync OFF"
+                });
+            }
+            KeyCode::Char('h') | KeyCode::Char('H') => {
+                // Toggle Count-in Mode
+                self.count_in_mode_enabled = !self.count_in_mode_enabled;
+                let new_state = self.count_in_mode_enabled;
+                let _ = self
+                    .command_sender
+                    .send(LayerCommand::ToggleCountInMode(new_state));
+                self.show_success(if new_state {
+                    "Count-in Mode ON"
+                } else {
+                    "Count-in Mode OFF"
+                });
+            }
             KeyCode::Char('1') => {
-                self.toggle_layer_record(0);
+                self.handle_layer_key(0);
             }
             KeyCode::Char('2') => {
-                self.toggle_layer_record(1);
+                self.handle_layer_key(1);
             }
             KeyCode::Char('3') => {
-                self.toggle_layer_record(2);
+                self.handle_layer_key(2);
             }
             KeyCode::Char('4') => {
-                self.toggle_layer_record(3);
+                self.handle_layer_key(3);
             }
             KeyCode::Char('5') => {
-                self.toggle_layer_record(4);
+                self.handle_layer_key(4);
             }
             KeyCode::Char('6') => {
-                self.toggle_layer_record(5);
+                self.handle_layer_key(5);
             }
             KeyCode::Char('7') => {
-                self.toggle_layer_record(6);
+                self.handle_layer_key(6);
             }
             KeyCode::Char('8') => {
-                self.toggle_layer_record(7);
+                self.handle_layer_key(7);
             }
             KeyCode::Char('9') => {
-                self.toggle_layer_record(8);
+                self.handle_layer_key(8);
             }
             KeyCode::Char('0') => {
-                self.toggle_layer_record(9);
+                self.handle_layer_key(9);
             }
             KeyCode::Char('r') => {
                 // Record on selected layer
-                self.toggle_layer_record(self.selected_layer);
+                if self.beat_sync_enabled {
+                    let _ = self
+                        .command_sender
+                        .send(LayerCommand::SyncRecord(self.selected_layer));
+                } else {
+                    self.toggle_layer_record(self.selected_layer);
+                }
             }
             KeyCode::Char('s') => {
-                // Stop selected layer only
-                self.stop_selected_layer();
+                // Stop selected layer only (stop recording immediately; stop playback synced if enabled)
+                let (is_recording, _is_playing) = match self.layers[self.selected_layer].lock() {
+                    Ok(layer) => (layer.is_recording, layer.is_playing),
+                    Err(_) => (false, false),
+                };
+                if is_recording {
+                    let _ = self
+                        .command_sender
+                        .send(LayerCommand::StopRecording(self.selected_layer));
+                } else if self.beat_sync_enabled {
+                    let _ = self
+                        .command_sender
+                        .send(LayerCommand::SyncStop(self.selected_layer));
+                } else {
+                    self.stop_selected_layer();
+                }
             }
             KeyCode::Char(' ') => {
                 // Stop all
@@ -230,7 +310,13 @@ impl TerminalUI {
                 self.toggle_solo(self.selected_layer);
             }
             KeyCode::Char('p') => {
-                self.start_playback(self.selected_layer);
+                if self.beat_sync_enabled {
+                    let _ = self
+                        .command_sender
+                        .send(LayerCommand::SyncPlay(self.selected_layer));
+                } else {
+                    self.start_playback(self.selected_layer);
+                }
             }
             KeyCode::Char('c') => {
                 self.clear_layer(self.selected_layer);
@@ -272,6 +358,35 @@ impl TerminalUI {
             AudioEvent::Error(msg) => {
                 self.show_success(&format!("Error: {}", msg));
             }
+            AudioEvent::BpmChanged(bpm) => {
+                self.bpm_display = bpm;
+                self.show_success(&format!("BPM: {:.1}", bpm));
+            }
+            AudioEvent::Beat(beat, measure) => {
+                self.current_beat = beat;
+                self.current_measure = measure;
+            }
+            AudioEvent::CountInStarted { layer_id, beats } => {
+                self.count_in_remaining = Some((layer_id, beats));
+            }
+            AudioEvent::CountInFinished { layer_id } => {
+                self.count_in_remaining = None;
+                self.show_success(&format!("Count-in done L{}", layer_id + 1));
+            }
+            AudioEvent::CountInTick {
+                layer_id,
+                remaining_beats,
+            } => {
+                let _ = layer_id; // we keep for potential per-layer UI later
+                self.count_in_remaining = Some((layer_id, remaining_beats));
+            }
+            AudioEvent::CountInModeToggled(on) => {
+                self.show_success(if on {
+                    "Count-in Mode ON"
+                } else {
+                    "Count-in Mode OFF"
+                });
+            }
             AudioEvent::DeviceSwitchRequested => {
                 self.show_success("Switching audio devices...");
             }
@@ -291,6 +406,9 @@ impl TerminalUI {
                     None => self.output_device_name = "No device".to_string(),
                 }
                 self.show_success("Devices updated");
+            }
+            AudioEvent::MetronomeToggled(on) => {
+                self.show_success(if on { "Metronome ON" } else { "Metronome OFF" });
             }
             _ => {
                 // no-op
@@ -316,6 +434,34 @@ impl TerminalUI {
                 // Start recording
                 let _ = self.command_sender.send(LayerCommand::Record(layer_id));
             }
+        }
+    }
+
+    fn handle_layer_key(&mut self, layer_id: usize) {
+        if layer_id >= self.layers.len() {
+            return;
+        }
+        let (is_recording, is_playing) = match self.layers[layer_id].lock() {
+            Ok(layer) => (layer.is_recording, layer.is_playing),
+            Err(_) => return,
+        };
+
+        if is_recording {
+            let _ = self
+                .command_sender
+                .send(LayerCommand::StopRecording(layer_id));
+        } else if is_playing {
+            if self.beat_sync_enabled {
+                let _ = self.command_sender.send(LayerCommand::SyncStop(layer_id));
+            } else {
+                let _ = self
+                    .command_sender
+                    .send(LayerCommand::StopPlaying(layer_id));
+            }
+        } else if self.beat_sync_enabled {
+            let _ = self.command_sender.send(LayerCommand::SyncRecord(layer_id));
+        } else {
+            let _ = self.command_sender.send(LayerCommand::Record(layer_id));
         }
     }
 
@@ -505,6 +651,14 @@ impl TerminalUI {
                             Err(error) => {
                                 self.show_success(&format!("Export failed: {}", error));
                             }
+                        }
+                    }
+                    InputMode::SetBpm => {
+                        let text = self.input_buffer.trim();
+                        if let Ok(value) = text.parse::<f64>() {
+                            let _ = self.command_sender.send(LayerCommand::SetBpm(value));
+                        } else {
+                            self.show_success("Invalid BPM");
                         }
                     }
                 }
@@ -917,7 +1071,9 @@ impl TerminalUI {
 
     fn update_input_display(&mut self) {
         if let Some(HeaderStatus::InputPrompt(ref prompt, _)) = self.header_status {
-            let display_input = if self.input_buffer.is_empty() {
+            let display_input = if prompt.starts_with("Set BPM") {
+                self.input_buffer.clone()
+            } else if self.input_buffer.is_empty() {
                 ".wav".to_string()
             } else {
                 format!("{}.wav", self.input_buffer)
@@ -979,6 +1135,7 @@ impl TerminalUI {
     fn draw(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let selected_layer = self.selected_layer;
         let layers = Arc::clone(&self.layers);
+        let countdown = self.count_in_remaining;
 
         // Extract values to avoid borrow checker issues
         let input_device_name = self.input_device_name.clone();
@@ -993,7 +1150,7 @@ impl TerminalUI {
                 .constraints([
                     Constraint::Length(3), // Header
                     Constraint::Min(0),    // Layers
-                    Constraint::Length(4), // Footer (2 lines of content + borders)
+                    Constraint::Length(5), // Footer (3 lines of content + borders)
                 ])
                 .split(f.area());
 
@@ -1004,8 +1161,16 @@ impl TerminalUI {
                 &output_device_name,
                 &header_status,
             );
-            Self::draw_layers_static(f, chunks[1], &layers, selected_layer);
-            Self::draw_footer_static(f, chunks[2]);
+            Self::draw_layers_static(f, chunks[1], &layers, selected_layer, countdown);
+            Self::draw_footer_static(
+                f,
+                chunks[2],
+                self.bpm_display,
+                self.current_beat,
+                self.current_measure,
+                self.beat_sync_enabled,
+                self.metronome_enabled,
+            );
 
             // Draw file picker overlay if active
             if file_picker_overlay {
@@ -1300,13 +1465,14 @@ impl TerminalUI {
         area: Rect,
         layers: &Arc<Vec<Arc<Mutex<AudioLayer>>>>,
         selected_layer: usize,
+        countdown: Option<(usize, u32)>,
     ) {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
             .split(area);
 
-        Self::draw_layer_list_static(f, chunks[0], layers, selected_layer);
+        Self::draw_layer_list_static(f, chunks[0], layers, selected_layer, countdown);
         Self::draw_layer_details_static(f, chunks[1], layers, selected_layer);
     }
 
@@ -1315,6 +1481,7 @@ impl TerminalUI {
         area: Rect,
         layers: &Arc<Vec<Arc<Mutex<AudioLayer>>>>,
         selected_layer: usize,
+        countdown: Option<(usize, u32)>,
     ) {
         use ratatui::text::Span;
         use ratatui::widgets::{Cell, Row, Table};
@@ -1326,16 +1493,33 @@ impl TerminalUI {
             .map(|(i, layer_arc)| {
                 let layer = layer_arc.lock().unwrap();
 
-                // Determine status and color
-                let (status_text, status_color) = if layer.is_recording {
-                    ("[REC]", Color::Red)
+                // Determine status and color; inject count-in countdown if relevant
+                let mut status_text = if layer.is_recording {
+                    "[REC]".to_string()
                 } else if layer.is_playing {
-                    ("[PLAY]", Color::Green)
+                    "[PLAY]".to_string()
                 } else if !layer.is_empty() {
-                    ("[PAUSE]", Color::Yellow)
+                    "[PAUSE]".to_string()
                 } else {
-                    ("[EMPTY]", Color::Gray)
+                    "[EMPTY]".to_string()
                 };
+
+                let mut status_color = if status_text == "[REC]" {
+                    Color::Red
+                } else if status_text == "[PLAY]" {
+                    Color::Green
+                } else if status_text == "[PAUSE]" {
+                    Color::Yellow
+                } else {
+                    Color::Gray
+                };
+                if let Some((layer_id, beats_left)) = countdown
+                    && layer_id == i
+                {
+                    // Replace status text with countdown 3-2-1 (show 1..n)
+                    status_text = format!("[{}]", beats_left);
+                    status_color = Color::Cyan;
+                }
 
                 // Create status cell with color
                 let status_cell = Cell::from(Span::styled(
@@ -1477,7 +1661,15 @@ impl TerminalUI {
         f.render_widget(details, chunks[1]);
     }
 
-    fn draw_footer_static(f: &mut Frame, area: Rect) {
+    fn draw_footer_static(
+        f: &mut Frame,
+        area: Rect,
+        bpm: f64,
+        beat: u32,
+        measure: usize,
+        sync_on: bool,
+        metro_on: bool,
+    ) {
         use ratatui::text::{Line, Span};
 
         // Define colors for syntax highlighting
@@ -1500,7 +1692,7 @@ impl TerminalUI {
         // Helper function to create separator
         let separator = || Span::styled(" | ".to_string(), Style::default().fg(sep_color));
 
-        // Build line 1 with syntax highlighting - organized logically
+        // Build line 1 - navigation, record/stop basics
         let mut line1_spans = Vec::new();
         line1_spans.extend(key_desc("↑↓", "Select"));
         line1_spans.push(separator());
@@ -1511,22 +1703,12 @@ impl TerminalUI {
         line1_spans.extend(key_desc("S", "Stop"));
         line1_spans.push(separator());
         line1_spans.extend(key_desc("Space", "Stop All"));
-        line1_spans.push(separator());
-        line1_spans.extend(key_desc("P", "Play"));
-        line1_spans.push(separator());
-        line1_spans.extend(key_desc("A", "Play All"));
 
-        // Build line 2 with syntax highlighting - organized logically
+        // Build line 2 - playback and file ops
         let mut line2_spans = Vec::new();
-        line2_spans.extend(key_desc("+/-", "Volume"));
+        line2_spans.extend(key_desc("P", "Play"));
         line2_spans.push(separator());
-        line2_spans.extend(key_desc("M", "Mute"));
-        line2_spans.push(separator());
-        line2_spans.extend(key_desc("L", "Solo"));
-        line2_spans.push(separator());
-        line2_spans.extend(key_desc("C", "Clear"));
-        line2_spans.push(separator());
-        line2_spans.extend(key_desc("X", "Clear All"));
+        line2_spans.extend(key_desc("A", "Play All"));
         line2_spans.push(separator());
         line2_spans.extend(key_desc("I", "Import"));
         line2_spans.push(separator());
@@ -1536,7 +1718,52 @@ impl TerminalUI {
         line2_spans.push(separator());
         line2_spans.extend(key_desc("Q", "Quit"));
 
-        let help_text = vec![Line::from(line1_spans), Line::from(line2_spans)];
+        // Build line 3 - mixing and tempo/sync
+        let mut line3_spans = Vec::new();
+        line3_spans.extend(key_desc("+/-", "Volume"));
+        line3_spans.push(separator());
+        line3_spans.extend(key_desc("M", "Mute"));
+        line3_spans.push(separator());
+        line3_spans.extend(key_desc("L", "Solo"));
+        line3_spans.push(separator());
+        line3_spans.extend(key_desc("B", "Tap"));
+        line3_spans.push(separator());
+        line3_spans.extend(key_desc("T", "BPM"));
+        line3_spans.push(separator());
+        line3_spans.extend(key_desc("G", if sync_on { "Sync On" } else { "Sync Off" }));
+        line3_spans.push(separator());
+        line3_spans.extend(key_desc("H", "Count-in"));
+        line3_spans.push(separator());
+        line3_spans.extend(key_desc(
+            "N",
+            if metro_on {
+                "Metronome On"
+            } else {
+                "Metronome Off"
+            },
+        ));
+
+        let status_line = Line::from(vec![
+            Span::styled(
+                format!(" BPM: {:.1} ", bpm),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" Beat: {}/{} ", beat, measure + 1),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]);
+
+        let help_text = vec![
+            Line::from(line1_spans),
+            Line::from(line2_spans),
+            Line::from(line3_spans),
+            status_line,
+        ];
 
         let footer = Paragraph::new(help_text)
             .block(Block::default().borders(Borders::ALL).title("Controls"));
