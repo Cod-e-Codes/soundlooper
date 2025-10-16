@@ -5,9 +5,62 @@ use soundlooper::ui::TerminalUI;
 use std::sync::Arc;
 use std::thread;
 
+fn print_help() {
+    println!("Soundlooper - Terminal-based multi-layer audio looper");
+    println!();
+    println!("USAGE:");
+    println!("    soundlooper [OPTIONS]");
+    println!();
+    println!("OPTIONS:");
+    println!("    -h, --help      Print this help message");
+    println!("    --debug         Enable debug logging");
+    println!();
+    println!("DESCRIPTION:");
+    println!("    A terminal-based multi-layer audio looper supporting real-time");
+    println!("    recording, playback, and mixing of up to 16 audio layers.");
+    println!();
+    println!("FEATURES:");
+    println!("    • 16-layer audio recording and playback");
+    println!("    • Real-time audio processing with low latency");
+    println!("    • WAV file import/export with validation");
+    println!("    • Per-layer volume, mute, and solo controls");
+    println!("    • Cross-platform audio support");
+    println!("    • Professional terminal UI with syntax highlighting");
+    println!();
+    println!("CONTROLS:");
+    println!("    ↑↓     Select layer");
+    println!("    1-9,0  Record/Stop/Play layer 1-10");
+    println!("    R      Record on selected layer");
+    println!("    S      Stop selected layer");
+    println!("    Space  Stop all layers");
+    println!("    P      Play selected layer");
+    println!("    A      Play all layers");
+    println!("    +/-    Adjust volume");
+    println!("    M      Mute/unmute selected layer");
+    println!("    L      Solo/unsolo selected layer");
+    println!("    C      Clear selected layer");
+    println!("    X      Clear all layers");
+    println!("    I      Import WAV file to selected layer");
+    println!("    E      Export composition as WAV");
+    println!("    Q      Quit");
+    println!();
+    println!("EXAMPLES:");
+    println!("    soundlooper              # Start with default settings");
+    println!("    soundlooper --debug      # Start with debug logging");
+    println!();
+    println!("For more information, visit: https://github.com/Cod-e-Codes/soundlooper");
+}
+
 fn main() -> Result<()> {
     // Parse command line arguments
     let args: Vec<String> = std::env::args().collect();
+
+    // Check for help flag
+    if args.contains(&"--help".to_string()) || args.contains(&"-h".to_string()) {
+        print_help();
+        return Ok(());
+    }
+
     let debug_mode = args.contains(&"--debug".to_string());
 
     if debug_mode {

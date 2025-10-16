@@ -1,6 +1,6 @@
 # Soundlooper
 
-A terminal-based multi-layer audio looper built in Rust, supporting real-time recording, playback, and mixing of up to 16 audio layers.
+A real-time multi-layer audio looper built in Rust with a terminal UI. Record, mix, and loop up to 16 audio tracks with per-layer controls, WAV import/export, and low-latency playback. Cross-platform support for Windows, macOS, and Linux.
 
 ## Features
 
@@ -22,6 +22,9 @@ cargo build --release
 
 # Run the application
 cargo run --release
+
+# Show help
+cargo run --release -- --help
 
 # Run with debug logging
 cargo run --release -- --debug
