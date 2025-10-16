@@ -1,15 +1,14 @@
 use crossbeam::channel::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
-use super::{AudioConfig, AudioEvent, AudioLayer, LayerCommand, TempoEngine};
+use super::{AudioConfig, AudioEvent, AudioLayer, LayerCommand, SharedLockFreeBuffer, TempoEngine};
 // use super::io::import_wav;
 
 pub struct LooperEngine {
     layers: Arc<Vec<Arc<Mutex<AudioLayer>>>>,
     config: AudioConfig,
     master_loop_length: Arc<Mutex<Option<usize>>>,
-    input_buffer: Arc<Mutex<Vec<f32>>>,
-    output_buffer: Arc<Mutex<Vec<f32>>>,
+    input_buffer: SharedLockFreeBuffer,
     is_recording: Arc<Mutex<bool>>,
     recording_layer: Arc<Mutex<Option<usize>>>,
     command_receiver: Arc<Mutex<Option<Receiver<LayerCommand>>>>,
@@ -40,8 +39,7 @@ impl LooperEngine {
             layers: Arc::new(layers),
             config: config.clone(),
             master_loop_length: Arc::new(Mutex::new(None)),
-            input_buffer: Arc::new(Mutex::new(Vec::with_capacity(config.buffer_size))),
-            output_buffer: Arc::new(Mutex::new(Vec::with_capacity(config.buffer_size))),
+            input_buffer: SharedLockFreeBuffer::new(config.buffer_size * 4), // 4x capacity for safety
             is_recording: Arc::new(Mutex::new(false)),
             recording_layer: Arc::new(Mutex::new(None)),
             command_receiver: Arc::new(Mutex::new(None)),
@@ -91,10 +89,12 @@ impl LooperEngine {
             }
         }
 
-        // Clear output buffer
-        if let Ok(mut output_buf) = self.output_buffer.lock() {
-            output_buf.clear();
-            output_buf.resize(output.len(), 0.0);
+        // Write input to lock-free buffer (non-blocking)
+        if !self.input_buffer.try_write(input)
+            && let Ok(debug_mode) = self.debug_mode.lock()
+            && *debug_mode
+        {
+            eprintln!("Warning: Input buffer overrun or lock contention");
         }
 
         // Process commands from UI thread
@@ -105,20 +105,20 @@ impl LooperEngine {
             && let Some(layer_id) = *recording_layer
             && let Ok(mut layer) = self.layers[layer_id].lock()
         {
-            layer.append_samples(input);
+            // Read from input buffer for recording
+            let mut temp_buffer = vec![0.0; input.len()];
+            let read_count = self.input_buffer.try_read(&mut temp_buffer);
+            if read_count > 0 {
+                layer.append_samples(&temp_buffer[..read_count]);
+            }
         }
 
-        // Mix all layers into output buffer
-        if let Ok(mut output_buf) = self.output_buffer.lock() {
-            output_buf.fill(0.0);
-            Self::mix_layers_static(&self.layers, &mut output_buf);
+        // Mix all layers directly to output (no intermediate buffer!)
+        output.fill(0.0);
+        Self::mix_layers_static(&self.layers, output);
 
-            // Mix metronome if active
-            self.mix_metronome(&mut output_buf);
-
-            // Copy to final output
-            output.copy_from_slice(&output_buf);
-        }
+        // Mix metronome if active
+        self.mix_metronome(output);
 
         // Only process tempo if beat sync or metronome is enabled
         let (beat_sync_enabled, metronome_enabled) = (
@@ -744,20 +744,14 @@ impl LooperEngine {
     }
 
     pub fn store_input_samples(&self, samples: &[f32]) {
-        if let Ok(mut input_buf) = self.input_buffer.lock() {
-            input_buf.clear();
-            input_buf.extend_from_slice(samples);
-        } else {
-            eprintln!("Warning: Failed to lock input buffer for writing");
-        }
+        self.input_buffer.try_write(samples);
     }
 
     pub fn get_input_samples(&self) -> Vec<f32> {
-        if let Ok(input_buf) = self.input_buffer.lock() {
-            input_buf.clone()
-        } else {
-            vec![]
-        }
+        let mut buffer = vec![0.0; 1024]; // Temporary buffer
+        let read_count = self.input_buffer.try_read(&mut buffer);
+        buffer.truncate(read_count);
+        buffer
     }
 
     pub fn load_audio_to_layer(

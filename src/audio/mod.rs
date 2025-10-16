@@ -1,11 +1,13 @@
 pub mod io;
 pub mod layer;
+pub mod lockfree_buffer;
 pub mod looper;
 pub mod stream;
 pub mod tempo;
 
 pub use io::{export_wav, import_wav};
 pub use layer::AudioLayer;
+pub use lockfree_buffer::{AudioBufferPair, LockFreeAudioBuffer, SharedLockFreeBuffer};
 pub use looper::LooperEngine;
 pub use stream::AudioStream;
 pub use tempo::TempoEngine;
