@@ -16,7 +16,7 @@ pub struct AudioLayer {
 
 impl AudioLayer {
     pub fn new(id: usize) -> Self {
-        Self {
+        let mut layer = Self {
             id,
             buffer: Vec::new(),
             volume: 1.0,
@@ -29,7 +29,11 @@ impl AudioLayer {
             loop_end: 0,
             undo_history: crate::audio::undo_history::UndoHistory::new(),
             meter: crate::audio::peak_meter::PeakMeter::new(),
-        }
+        };
+
+        // Save initial empty state to history
+        layer.save_state_to_history();
+        layer
     }
 
     pub fn start_recording(&mut self) {
@@ -50,6 +54,9 @@ impl AudioLayer {
         if !self.buffer.is_empty() {
             self.loop_end = self.buffer.len();
             self.is_playing = true;
+
+            // Save the recorded state to history after recording stops
+            self.save_state_to_history();
         }
     }
 
