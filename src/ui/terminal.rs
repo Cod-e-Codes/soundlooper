@@ -18,6 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::audio::stream::enumerate_device_names;
 use crate::audio::{AudioEvent, AudioLayer, LayerCommand};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -30,6 +31,13 @@ enum InputMode {
         scroll_offset: usize,
     },
     ExportWav,
+    DevicePicker {
+        inputs: Vec<String>,
+        outputs: Vec<String>,
+        column: usize,         // 0 = inputs, 1 = outputs
+        selected_index: usize, // index within current column
+        scroll_offset: usize,  // scroll for the current column
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -239,6 +247,10 @@ impl TerminalUI {
                 // Import WAV to selected layer
                 self.import_wav_to_layer(self.selected_layer);
             }
+            KeyCode::Char('o') => {
+                // Open device picker
+                self.open_device_picker();
+            }
             KeyCode::Char('e') => {
                 // Export composition as WAV
                 self.export_composition();
@@ -422,6 +434,40 @@ impl TerminalUI {
                             }
                         }
                     }
+                    InputMode::DevicePicker {
+                        inputs,
+                        outputs,
+                        column,
+                        selected_index,
+                        scroll_offset,
+                    } => {
+                        // Apply current selection without closing overlay
+                        if column == 0 {
+                            if !inputs.is_empty() && selected_index < inputs.len() {
+                                self.input_device_name = inputs[selected_index].clone();
+                                self.show_success(&format!(
+                                    "Selected input: {} (restart to apply)",
+                                    self.input_device_name
+                                ));
+                            }
+                        } else if !outputs.is_empty() && selected_index < outputs.len() {
+                            self.output_device_name = outputs[selected_index].clone();
+                            self.show_success(&format!(
+                                "Selected output: {} (restart to apply)",
+                                self.output_device_name
+                            ));
+                        }
+
+                        // Keep the picker open
+                        self.input_mode = Some(InputMode::DevicePicker {
+                            inputs,
+                            outputs,
+                            column,
+                            selected_index,
+                            scroll_offset,
+                        });
+                        return Ok(());
+                    }
                     InputMode::ExportWav => {
                         let filename = self.ensure_wav_extension(self.input_buffer.clone());
 
@@ -445,6 +491,41 @@ impl TerminalUI {
                 // Cancel input
                 self.show_cancelled();
                 self.exit_input_mode();
+            }
+            KeyCode::Tab => {
+                if let InputMode::DevicePicker {
+                    inputs,
+                    outputs,
+                    column,
+                    selected_index,
+                    scroll_offset,
+                } = input_mode
+                {
+                    let new_column = 1 - column;
+                    // Clamp selection within new column size
+                    let max_len = if new_column == 0 {
+                        inputs.len()
+                    } else {
+                        outputs.len()
+                    };
+                    let new_selected = if max_len == 0 {
+                        0
+                    } else if selected_index >= max_len {
+                        max_len - 1
+                    } else {
+                        selected_index
+                    };
+                    let new_scroll =
+                        self.calculate_scroll_offset(new_selected, scroll_offset, max_len);
+                    self.input_mode = Some(InputMode::DevicePicker {
+                        inputs,
+                        outputs,
+                        column: new_column,
+                        selected_index: new_selected,
+                        scroll_offset: new_scroll,
+                    });
+                    return Ok(());
+                }
             }
             KeyCode::Backspace => {
                 self.input_buffer.pop();
@@ -477,6 +558,35 @@ impl TerminalUI {
                         selected_index: new_index,
                         scroll_offset: new_scroll_offset,
                     });
+                } else if let InputMode::DevicePicker {
+                    inputs,
+                    outputs,
+                    column,
+                    selected_index,
+                    scroll_offset,
+                } = input_mode
+                {
+                    let list_len = if column == 0 {
+                        inputs.len()
+                    } else {
+                        outputs.len()
+                    };
+                    let new_index = if list_len == 0 {
+                        0
+                    } else if selected_index > 0 {
+                        selected_index - 1
+                    } else {
+                        list_len.saturating_sub(1)
+                    };
+                    let new_scroll =
+                        self.calculate_scroll_offset(new_index, scroll_offset, list_len);
+                    self.input_mode = Some(InputMode::DevicePicker {
+                        inputs,
+                        outputs,
+                        column,
+                        selected_index: new_index,
+                        scroll_offset: new_scroll,
+                    });
                 }
             }
             KeyCode::Down => {
@@ -501,6 +611,35 @@ impl TerminalUI {
                         entries: entries.clone(),
                         selected_index: new_index,
                         scroll_offset: new_scroll_offset,
+                    });
+                } else if let InputMode::DevicePicker {
+                    inputs,
+                    outputs,
+                    column,
+                    selected_index,
+                    scroll_offset,
+                } = input_mode
+                {
+                    let list_len = if column == 0 {
+                        inputs.len()
+                    } else {
+                        outputs.len()
+                    };
+                    let new_index = if list_len == 0 {
+                        0
+                    } else if selected_index + 1 < list_len {
+                        selected_index + 1
+                    } else {
+                        0
+                    };
+                    let new_scroll =
+                        self.calculate_scroll_offset(new_index, scroll_offset, list_len);
+                    self.input_mode = Some(InputMode::DevicePicker {
+                        inputs,
+                        outputs,
+                        column,
+                        selected_index: new_index,
+                        scroll_offset: new_scroll,
                     });
                 }
             }
@@ -793,6 +932,27 @@ impl TerminalUI {
         self.start_input_mode(InputMode::ExportWav, "Export composition as: ");
     }
 
+    fn open_device_picker(&mut self) {
+        match enumerate_device_names() {
+            Ok((inputs, outputs)) => {
+                // Start focused on inputs
+                let selected = 0usize;
+                let scroll = 0usize;
+                self.input_mode = Some(InputMode::DevicePicker {
+                    inputs,
+                    outputs,
+                    column: 0,
+                    selected_index: selected,
+                    scroll_offset: scroll,
+                });
+                self.file_picker_overlay = true;
+            }
+            Err(e) => {
+                self.show_success(&format!("Error listing devices: {}", e));
+            }
+        }
+    }
+
     fn draw(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let selected_layer = self.selected_layer;
         let layers = Arc::clone(&self.layers);
@@ -826,7 +986,15 @@ impl TerminalUI {
 
             // Draw file picker overlay if active
             if file_picker_overlay {
-                Self::draw_file_picker_overlay_static(f, f.area(), &input_mode);
+                match input_mode {
+                    Some(InputMode::FilePicker { .. }) => {
+                        Self::draw_file_picker_overlay_static(f, f.area(), &input_mode);
+                    }
+                    Some(InputMode::DevicePicker { .. }) => {
+                        Self::draw_device_picker_overlay_static(f, f.area(), &input_mode);
+                    }
+                    _ => {}
+                }
             }
         })?;
         Ok(())
@@ -968,6 +1136,135 @@ impl TerminalUI {
             // Draw instructions at the bottom
             let instructions = "↑↓: Navigate | Enter: Select/Open | Esc: Cancel";
             let instructions_area = Rect::new(x + 1, y + overlay_height - 1, overlay_width - 2, 1);
+            let instructions_widget = Paragraph::new(instructions)
+                .style(Style::default().fg(Color::Yellow))
+                .alignment(ratatui::layout::Alignment::Center);
+            f.render_widget(instructions_widget, instructions_area);
+        }
+    }
+
+    fn draw_device_picker_overlay_static(
+        f: &mut Frame,
+        area: Rect,
+        input_mode: &Option<InputMode>,
+    ) {
+        if let Some(InputMode::DevicePicker {
+            inputs,
+            outputs,
+            column,
+            selected_index,
+            scroll_offset,
+        }) = input_mode
+        {
+            let overlay_width = 70u16;
+            let overlay_height = 20u16;
+            let x = (area.width.saturating_sub(overlay_width)) / 2;
+            let y = (area.height.saturating_sub(overlay_height)) / 2;
+
+            let overlay_area = Rect::new(x, y, overlay_width, overlay_height);
+
+            // Background and border
+            for row in y..y + overlay_height {
+                let bg_line = Paragraph::new(" ".repeat(overlay_width as usize))
+                    .style(Style::default().bg(Color::Black));
+                let line_area = Rect::new(x, row, overlay_width, 1);
+                f.render_widget(bg_line, line_area);
+            }
+            let bg = Paragraph::new(" ".repeat(overlay_width as usize))
+                .style(Style::default().bg(Color::Black))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Select Devices (Options)"),
+                );
+            f.render_widget(bg, overlay_area);
+
+            // Layout inside overlay: two columns
+            let columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(Rect::new(
+                    x + 1,
+                    y + 1,
+                    overlay_width - 2,
+                    overlay_height - 3,
+                ));
+
+            // Helper to draw a list column
+            let draw_list = |f: &mut Frame,
+                             area: Rect,
+                             title: &str,
+                             items: &Vec<String>,
+                             selected: usize,
+                             active: bool,
+                             scroll: usize| {
+                // Title
+                let title_widget = Paragraph::new(title).style(
+                    Style::default()
+                        .fg(if active { Color::Yellow } else { Color::Cyan })
+                        .add_modifier(Modifier::BOLD),
+                );
+                let title_area = Rect::new(area.x, area.y, area.width, 1);
+                f.render_widget(title_widget, title_area);
+
+                // Items area
+                let list_area = Rect::new(
+                    area.x,
+                    area.y + 1,
+                    area.width,
+                    area.height.saturating_sub(1),
+                );
+                const VISIBLE_ITEMS: usize = 15;
+                let start_index = scroll;
+                for (i, name) in items
+                    .iter()
+                    .enumerate()
+                    .skip(start_index)
+                    .take(VISIBLE_ITEMS)
+                {
+                    let idx = i;
+                    let styled = if active && idx == selected {
+                        Paragraph::new(format!("> {}", name))
+                            .style(Style::default().bg(Color::Blue).fg(Color::White))
+                    } else {
+                        Paragraph::new(format!("  {}", name))
+                            .style(Style::default().fg(Color::White))
+                    };
+                    // Render each line
+                    let row_area = Rect::new(
+                        list_area.x,
+                        list_area.y + (i - start_index) as u16,
+                        list_area.width,
+                        1,
+                    );
+                    f.render_widget(styled, row_area);
+                }
+            };
+
+            // Draw input list (left)
+            draw_list(
+                f,
+                columns[0],
+                "Input Devices",
+                inputs,
+                *selected_index,
+                *column == 0,
+                *scroll_offset,
+            );
+            // Draw output list (right)
+            draw_list(
+                f,
+                columns[1],
+                "Output Devices",
+                outputs,
+                *selected_index,
+                *column == 1,
+                *scroll_offset,
+            );
+
+            // Instructions
+            let instructions = "↑↓: Navigate  Tab: Switch  Enter: Select  Esc: Close";
+            let instructions_area = Rect::new(x + 1, y + overlay_height - 2, overlay_width - 2, 1);
             let instructions_widget = Paragraph::new(instructions)
                 .style(Style::default().fg(Color::Yellow))
                 .alignment(ratatui::layout::Alignment::Center);
@@ -1211,6 +1508,8 @@ impl TerminalUI {
         line2_spans.extend(key_desc("I", "Import"));
         line2_spans.push(separator());
         line2_spans.extend(key_desc("E", "Export"));
+        line2_spans.push(separator());
+        line2_spans.extend(key_desc("O", "Options"));
         line2_spans.push(separator());
         line2_spans.extend(key_desc("Q", "Quit"));
 

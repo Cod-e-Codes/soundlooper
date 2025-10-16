@@ -11,6 +11,7 @@ A real-time multi-layer audio looper built in Rust with a terminal UI. Record, m
 - **Per-layer Controls**: Individual volume, mute, and solo controls
 - **WAV Import/Export**: Import WAV files into layers and export compositions
 - **Terminal UI**: Clean, responsive TUI with device information display
+- **Options Panel**: Choose input/output audio devices directly from the TUI
 - **Cross-platform**: Works on Windows, macOS, and Linux
 - **Debug Mode**: Optional debug logging with `--debug` flag (logs written to `debug.log`)
 
@@ -50,7 +51,14 @@ cargo run --release -- --debug
 | `X` | Clear all layers |
 | `I` | Import WAV file to selected layer |
 | `E` | Export composition as WAV |
+| `O` | Options (select input/output devices) |
 | `Q` | Quit |
+
+### Options (Device Selection)
+
+- Press `O` to open Options.
+- Use `Tab` to switch between Input and Output lists, `↑/↓` to navigate, and `Enter` to select.
+- Selections update the displayed device names; restart the app to apply device changes.
 
 ## Architecture
 

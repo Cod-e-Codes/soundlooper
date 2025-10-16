@@ -326,3 +326,21 @@ impl AudioStream {
         Ok(())
     }
 }
+
+// Public helper to enumerate device names for UI consumption
+pub fn enumerate_device_names() -> Result<(Vec<String>, Vec<String>)> {
+    let host = cpal::default_host();
+
+    let mut inputs = Vec::new();
+    let mut outputs = Vec::new();
+
+    for device in host.input_devices()? {
+        inputs.push(device.name().unwrap_or_else(|_| "Unknown".to_string()));
+    }
+
+    for device in host.output_devices()? {
+        outputs.push(device.name().unwrap_or_else(|_| "Unknown".to_string()));
+    }
+
+    Ok((inputs, outputs))
+}

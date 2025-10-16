@@ -35,6 +35,7 @@ fn print_help() {
     println!("    Space  Stop all layers");
     println!("    P      Play selected layer");
     println!("    A      Play all layers");
+    println!("    O      Options (select input/output devices)");
     println!("    +/-    Adjust volume");
     println!("    M      Mute/unmute selected layer");
     println!("    L      Solo/unsolo selected layer");
