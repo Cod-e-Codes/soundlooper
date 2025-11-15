@@ -253,13 +253,17 @@ impl AudioStream {
         let input_stream = self.input_device.build_input_stream(
             &self.input_config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                // Convert multi-channel to mono by averaging all channels
-                let mono_data: Vec<f32> = data
-                    .chunks(input_channels as usize)
-                    .map(|chunk| chunk.iter().sum::<f32>() / chunk.len() as f32)
-                    .collect();
+                // Convert multi-channel to mono with stack buffer (typical max ~2048 samples)
+                let frame_count = data.len() / input_channels as usize;
+                let mut mono_buffer = [0.0f32; 4096]; // Stack allocated
 
-                looper_clone.store_input_samples(&mono_data);
+                for (i, chunk) in data.chunks(input_channels as usize).enumerate() {
+                    if i < mono_buffer.len() {
+                        mono_buffer[i] = chunk.iter().sum::<f32>() / chunk.len() as f32;
+                    }
+                }
+
+                looper_clone.store_input_samples(&mono_buffer[..frame_count]);
             },
             move |err| {
                 // Send error

@@ -269,11 +269,9 @@ impl LooperEngine {
             }
         }
 
-        // Play actions
+        // Play actions - process without collecting to avoid allocation
         if let Ok(mut to_play) = self.pending_play.try_lock() {
-            let layers_to_play: Vec<usize> = to_play.drain(..).collect();
-            drop(to_play);
-            for layer_id in layers_to_play {
+            while let Some(layer_id) = to_play.pop() {
                 if let Ok(mut layer) = self.layers[layer_id].try_lock()
                     && !layer.buffer.is_empty()
                 {
@@ -283,11 +281,9 @@ impl LooperEngine {
             }
         }
 
-        // Stop actions
+        // Stop actions - process without collecting to avoid allocation
         if let Ok(mut to_stop) = self.pending_stop.try_lock() {
-            let layers_to_stop: Vec<usize> = to_stop.drain(..).collect();
-            drop(to_stop);
-            for layer_id in layers_to_stop {
+            while let Some(layer_id) = to_stop.pop() {
                 if let Ok(mut layer) = self.layers[layer_id].try_lock() {
                     layer.stop_playing();
                     self.send_event(AudioEvent::LayerStopped(layer_id));
@@ -670,25 +666,27 @@ impl LooperEngine {
                     match super::io::import_wav(&file_path, sample_rate) {
                         Ok(samples) => {
                             if let Some(layer_arc) = layers.get(layer_id)
-                                && let Ok(mut layer) = layer_arc.lock() {
-                                    layer.buffer = samples;
-                                    layer.loop_end = layer.buffer.len();
-                                }
+                                && let Ok(mut layer) = layer_arc.lock()
+                            {
+                                layer.buffer = samples;
+                                layer.loop_end = layer.buffer.len();
+                            }
                             // Notify UI
                             if let Ok(sender) = event_sender.try_lock()
-                                && let Some(ref tx) = *sender {
-                                    let _ =
-                                        tx.try_send(AudioEvent::WavImported(layer_id, file_path));
-                                }
+                                && let Some(ref tx) = *sender
+                            {
+                                let _ = tx.try_send(AudioEvent::WavImported(layer_id, file_path));
+                            }
                         }
                         Err(e) => {
                             if let Ok(sender) = event_sender.try_lock()
-                                && let Some(ref tx) = *sender {
-                                    let _ = tx.try_send(AudioEvent::Error(format!(
-                                        "Failed to import WAV: {}",
-                                        e
-                                    )));
-                                }
+                                && let Some(ref tx) = *sender
+                            {
+                                let _ = tx.try_send(AudioEvent::Error(format!(
+                                    "Failed to import WAV: {}",
+                                    e
+                                )));
+                            }
                         }
                     }
                 });
@@ -712,18 +710,20 @@ impl LooperEngine {
                     match super::io::export_mixed_wav(&file_path, &layer_buffers, sample_rate) {
                         Ok(()) => {
                             if let Ok(sender) = event_sender.try_lock()
-                                && let Some(ref tx) = *sender {
-                                    let _ = tx.try_send(AudioEvent::WavExported(file_path));
-                                }
+                                && let Some(ref tx) = *sender
+                            {
+                                let _ = tx.try_send(AudioEvent::WavExported(file_path));
+                            }
                         }
                         Err(e) => {
                             if let Ok(sender) = event_sender.try_lock()
-                                && let Some(ref tx) = *sender {
-                                    let _ = tx.try_send(AudioEvent::Error(format!(
-                                        "Failed to export WAV: {}",
-                                        e
-                                    )));
-                                }
+                                && let Some(ref tx) = *sender
+                            {
+                                let _ = tx.try_send(AudioEvent::Error(format!(
+                                    "Failed to export WAV: {}",
+                                    e
+                                )));
+                            }
                         }
                     }
                 });
