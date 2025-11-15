@@ -77,30 +77,9 @@ impl LooperEngine {
     }
 
     pub fn process_audio(&self, input: &[f32], output: &mut [f32]) {
-        // Debug: Log when process_audio is called (periodically, only in debug mode)
-        if let Ok(debug_mode) = self.debug_mode.try_lock()
-            && *debug_mode
-        {
-            use std::sync::atomic::{AtomicUsize, Ordering};
-            static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
-            let count = CALL_COUNT.fetch_add(1, Ordering::Relaxed);
-            if count.is_multiple_of(1000) {
-                let _ = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("debug.log")
-                    .and_then(|mut file| {
-                        use std::io::Write;
-                        writeln!(
-                            file,
-                            "process_audio called #{}: input={} samples, output={} samples",
-                            count,
-                            input.len(),
-                            output.len()
-                        )
-                    });
-            }
-        }
+        // REMOVED: File I/O in audio thread is not real-time safe
+        // Debug logging should be done via lock-free channel to separate thread
+        // For now, removed to prevent blocking
 
         // Write input to lock-free buffer (non-blocking)
         if !self.input_buffer.try_write(input)
@@ -503,10 +482,10 @@ impl LooperEngine {
                 // Stop any current recording
                 if let Ok(recording_layer) = self.recording_layer.try_lock()
                     && let Some(current_layer) = *recording_layer
-                        && let Ok(mut layer) = self.layers[current_layer].try_lock()
-                    {
-                        layer.stop_recording();
-                    }
+                    && let Ok(mut layer) = self.layers[current_layer].try_lock()
+                {
+                    layer.stop_recording();
+                }
 
                 // Start recording on new layer
                 if let Ok(mut layer) = self.layers[layer_id].try_lock() {
@@ -531,9 +510,10 @@ impl LooperEngine {
                 }
 
                 if let Ok(mut recording_layer) = self.recording_layer.try_lock()
-                    && *recording_layer == Some(layer_id) {
-                        *recording_layer = None;
-                    }
+                    && *recording_layer == Some(layer_id)
+                {
+                    *recording_layer = None;
+                }
                 if let Ok(mut is_recording) = self.is_recording.try_lock() {
                     *is_recording = false;
                 }
@@ -623,9 +603,10 @@ impl LooperEngine {
 
                 // If this was the recording layer, clear it
                 if let Ok(mut recording_layer) = self.recording_layer.try_lock()
-                    && *recording_layer == Some(layer_id) {
-                        *recording_layer = None;
-                    }
+                    && *recording_layer == Some(layer_id)
+                {
+                    *recording_layer = None;
+                }
                 if let Ok(mut is_recording) = self.is_recording.try_lock() {
                     *is_recording = false;
                 }
@@ -680,41 +661,72 @@ impl LooperEngine {
                     return Err("Layer ID out of range".into());
                 }
 
-                match super::io::import_wav(&file_path, self.config.sample_rate) {
-                    Ok(samples) => {
-                        if let Ok(mut layer) = self.layers[layer_id].try_lock() {
-                            layer.buffer = samples;
-                            layer.loop_end = layer.buffer.len();
-                            self.send_event(AudioEvent::WavImported(layer_id, file_path));
+                // CRITICAL: Move file I/O to separate thread to avoid blocking audio thread
+                let layers = Arc::clone(&self.layers);
+                let sample_rate = self.config.sample_rate;
+                let event_sender = Arc::clone(&self.event_sender);
+
+                std::thread::spawn(move || {
+                    match super::io::import_wav(&file_path, sample_rate) {
+                        Ok(samples) => {
+                            if let Some(layer_arc) = layers.get(layer_id)
+                                && let Ok(mut layer) = layer_arc.lock() {
+                                    layer.buffer = samples;
+                                    layer.loop_end = layer.buffer.len();
+                                }
+                            // Notify UI
+                            if let Ok(sender) = event_sender.try_lock()
+                                && let Some(ref tx) = *sender {
+                                    let _ =
+                                        tx.try_send(AudioEvent::WavImported(layer_id, file_path));
+                                }
+                        }
+                        Err(e) => {
+                            if let Ok(sender) = event_sender.try_lock()
+                                && let Some(ref tx) = *sender {
+                                    let _ = tx.try_send(AudioEvent::Error(format!(
+                                        "Failed to import WAV: {}",
+                                        e
+                                    )));
+                                }
                         }
                     }
-                    Err(e) => {
-                        self.send_event(AudioEvent::Error(format!("Failed to import WAV: {}", e)));
-                    }
-                }
+                });
             }
             LayerCommand::ExportWav(file_path) => {
-                // Collect all layer buffers
-                let layer_buffers: Vec<Vec<f32>> = self
-                    .layers
-                    .iter()
-                    .filter_map(|layer_arc| {
-                        layer_arc.try_lock().ok().map(|layer| layer.buffer.clone())
-                    })
-                    .collect();
+                // CRITICAL: Move cloning and file I/O to separate thread
+                let layers = Arc::clone(&self.layers);
+                let sample_rate = self.config.sample_rate;
+                let event_sender = Arc::clone(&self.event_sender);
 
-                match super::io::export_mixed_wav(
-                    &file_path,
-                    &layer_buffers,
-                    self.config.sample_rate,
-                ) {
-                    Ok(()) => {
-                        self.send_event(AudioEvent::WavExported(file_path));
+                std::thread::spawn(move || {
+                    // Clone buffers in this thread, not audio thread
+                    let layer_buffers: Vec<Vec<f32>> = layers
+                        .iter()
+                        .filter_map(|layer_arc| {
+                            layer_arc.lock().ok().map(|layer| layer.buffer.clone())
+                        })
+                        .collect();
+
+                    // Perform file I/O
+                    match super::io::export_mixed_wav(&file_path, &layer_buffers, sample_rate) {
+                        Ok(()) => {
+                            if let Ok(sender) = event_sender.try_lock()
+                                && let Some(ref tx) = *sender {
+                                    let _ = tx.try_send(AudioEvent::WavExported(file_path));
+                                }
+                        }
+                        Err(e) => {
+                            if let Ok(sender) = event_sender.try_lock()
+                                && let Some(ref tx) = *sender {
+                                    let _ = tx.try_send(AudioEvent::Error(format!(
+                                        "Failed to export WAV: {}",
+                                        e
+                                    )));
+                                }
+                        }
                     }
-                    Err(e) => {
-                        self.send_event(AudioEvent::Error(format!("Failed to export WAV: {}", e)));
-                    }
-                }
+                });
             }
             // Tempo / Sync controls
             LayerCommand::TapTempo => {
