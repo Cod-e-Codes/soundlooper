@@ -327,7 +327,11 @@ impl AudioStream {
                 looper_clone.process_audio(&input_samples, &mut input_buffer);
 
                 // Simple linear interpolation resampling
-                let mut phase_locked = phase.lock().unwrap();
+                let Ok(mut phase_locked) = phase.try_lock() else {
+                    // If we can't get the lock, output silence
+                    data[..mono_len].fill(0.0);
+                    return;
+                };
                 for i in 0..mono_len {
                     let input_pos = *phase_locked;
                     let input_idx = input_pos.floor() as usize;
