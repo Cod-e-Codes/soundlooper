@@ -64,9 +64,11 @@ impl LooperEngine {
             count_in_mode: Arc::new(Mutex::new(false)),
             simd_mixer: Arc::new(Mutex::new(SimdMixer::new(config.buffer_size * 2))),
             // Preallocate scratch buffer for fallback mixing
-            scratch_buffer: Arc::new(Mutex::new(vec![0.0; config.buffer_size * 2])),
-            // Preallocate recording buffer
-            recording_scratch: Arc::new(Mutex::new(vec![0.0; config.buffer_size * 2])),
+            // 4x headroom to prevent resize() in RT callback (must never resize)
+            scratch_buffer: Arc::new(Mutex::new(vec![0.0; config.buffer_size * 4])),
+            // Preallocate recording buffer to max size (4096 samples max expected)
+            // Avoids resize() calls in audio callback
+            recording_scratch: Arc::new(Mutex::new(vec![0.0; 4096])),
         }
     }
 
@@ -95,13 +97,10 @@ impl LooperEngine {
             && layer.is_recording
         {
             // Try to get recording scratch buffer
+            // Buffer is preallocated to max size (4096) to avoid resize() in RT callback
             if let Ok(mut temp_buffer) = self.recording_scratch.try_lock() {
-                // Ensure buffer is large enough
-                if temp_buffer.len() < input.len() {
-                    temp_buffer.resize(input.len(), 0.0);
-                }
-
-                let read_count = self.input_buffer.try_read(&mut temp_buffer[..input.len()]);
+                let read_len = input.len().min(temp_buffer.len());
+                let read_count = self.input_buffer.try_read(&mut temp_buffer[..read_len]);
                 if read_count > 0 {
                     layer.append_samples(&temp_buffer[..read_count]);
                 }
@@ -363,10 +362,15 @@ impl LooperEngine {
         };
 
         // Ensure scratch buffer is large enough
+        // CRITICAL: This should never resize in RT context - buffer is preallocated to 4x size
+        // Use assertion to fail-fast in development if buffer is too small (indicates bug)
         let buffer_len = output.len();
-        if scratch.len() < buffer_len {
-            scratch.resize(buffer_len, 0.0);
-        }
+        assert!(
+            scratch.len() >= buffer_len,
+            "Scratch buffer too small: {} < {} - this should never happen!",
+            scratch.len(),
+            buffer_len
+        );
 
         // Mix layers using scratch buffer
         for layer_arc in layers.iter() {
@@ -426,21 +430,10 @@ impl LooperEngine {
         };
 
         if let Some(ref cmd_receiver) = receiver_opt {
-            let debug_mode = self.debug_mode.try_lock().map(|d| *d).unwrap_or(false);
-
             // Process commands one-by-one without collecting (zero allocations)
+            // NOTE: File I/O removed from audio thread for real-time safety
+            // Debug logging should use lock-free channel to separate thread
             while let Ok(command) = cmd_receiver.try_recv() {
-                if debug_mode {
-                    let _ = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("debug.log")
-                        .and_then(|mut file| {
-                            use std::io::Write;
-                            writeln!(file, "Received command: {:?}", command)
-                        });
-                }
-
                 // Silently drop errors (avoid eprintln! in audio thread)
                 let _ = self.send_command(command);
             }
@@ -868,11 +861,10 @@ impl LooperEngine {
         self.input_buffer.try_write(samples);
     }
 
-    pub fn get_input_samples(&self) -> Vec<f32> {
-        let mut buffer = vec![0.0; 1024]; // Temporary buffer
-        let read_count = self.input_buffer.try_read(&mut buffer);
-        buffer.truncate(read_count);
-        buffer
+    /// REAL-TIME SAFE: Reads input samples into provided buffer slice
+    /// Returns number of samples read (0 if buffer is empty or read fails)
+    pub fn read_input_samples(&self, buffer: &mut [f32]) -> usize {
+        self.input_buffer.try_read(buffer)
     }
 
     pub fn load_audio_to_layer(

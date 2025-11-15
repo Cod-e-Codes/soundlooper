@@ -289,82 +289,78 @@ impl AudioStream {
 
         // Accumulator for resampling
         let phase = Arc::new(Mutex::new(0.0_f64));
-        let callback_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        // Preallocate buffers for output callback to avoid allocations in RT context
+        // Max buffer size: 4096 samples per channel, worst case resampling needs ~8192
+        let max_input_buffer_size = 8192;
+        let input_buffer_state = Arc::new(Mutex::new(vec![0.0f32; max_input_buffer_size]));
+        let input_samples_buffer = Arc::new(Mutex::new(vec![0.0f32; 4096]));
 
         let output_stream = self.output_device.build_output_stream(
             &self.output_config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                let count = callback_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                // Periodic logging (only in debug mode)
-                if debug_mode && count.is_multiple_of(200) {
-                    let _ = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("debug.log")
-                        .and_then(|mut file| {
-                            use std::io::Write;
-                            writeln!(
-                                file,
-                                "Output callback #{}: {} samples ({}Hz -> {}Hz, ratio: {:.4})",
-                                count,
-                                data.len(),
-                                input_sample_rate,
-                                output_sample_rate,
-                                resample_ratio
-                            )
-                        });
-                }
-
-                // Get input samples
-                let input_samples = looper_clone.get_input_samples();
+                // NOTE: File I/O removed from audio callback for real-time safety
+                // Debug logging should use lock-free channel to separate thread
 
                 // Create buffer at input sample rate
                 let mono_len = data.len() / output_channels as usize;
 
                 // Calculate how many input samples we need
                 let input_samples_needed = (mono_len as f64 / resample_ratio).ceil() as usize;
-                let mut input_buffer = vec![0.0; input_samples_needed];
 
-                // Process audio at input sample rate
-                looper_clone.process_audio(&input_samples, &mut input_buffer);
+                // Work directly with preallocated heap buffers (no stack allocation, no copy)
+                // All locks held for entire operation to minimize contention window
+                if let (Ok(mut input_samples_buf), Ok(mut input_buf), Ok(mut phase_locked)) = (
+                    input_samples_buffer.try_lock(),
+                    input_buffer_state.try_lock(),
+                    phase.try_lock(),
+                ) {
+                    // Read input samples
+                    let input_samples_read = looper_clone
+                        .read_input_samples(&mut input_samples_buf)
+                        .min(4096);
 
-                // Simple linear interpolation resampling
-                let Ok(mut phase_locked) = phase.try_lock() else {
-                    // If we can't get the lock, output silence
-                    data[..mono_len].fill(0.0);
-                    return;
-                };
-                for i in 0..mono_len {
-                    let input_pos = *phase_locked;
-                    let input_idx = input_pos.floor() as usize;
-                    let frac = input_pos - input_pos.floor();
+                    let process_len = input_samples_needed.min(input_buf.len());
 
-                    let sample = if input_idx < input_buffer.len() - 1 {
-                        // Linear interpolation
-                        let s1 = input_buffer[input_idx];
-                        let s2 = input_buffer[input_idx + 1];
-                        s1 + (s2 - s1) * frac as f32
-                    } else if input_idx < input_buffer.len() {
-                        input_buffer[input_idx]
-                    } else {
-                        0.0
-                    };
+                    // Process audio at input sample rate directly into input_buf
+                    looper_clone.process_audio(
+                        &input_samples_buf[..input_samples_read],
+                        &mut input_buf[..process_len],
+                    );
 
-                    // Copy to all channels
-                    for channel in 0..output_channels as usize {
-                        if let Some(output_sample) =
-                            data.get_mut(i * output_channels as usize + channel)
-                        {
-                            *output_sample = sample;
+                    // Resample directly from input_buf (no copy needed)
+                    for i in 0..mono_len {
+                        let input_pos = *phase_locked;
+                        let input_idx = input_pos.floor() as usize;
+                        let frac = (input_pos - input_pos.floor()) as f32;
+
+                        // Branchless interpolation with bounds checking
+                        let idx_curr = input_idx.min(process_len.saturating_sub(1));
+                        let idx_next = (input_idx + 1).min(process_len.saturating_sub(1));
+                        let s1 = input_buf[idx_curr];
+                        let s2 = input_buf[idx_next];
+                        let sample = s1 + (s2 - s1) * frac;
+
+                        // Copy to all channels
+                        for channel in 0..output_channels as usize {
+                            if let Some(output_sample) =
+                                data.get_mut(i * output_channels as usize + channel)
+                            {
+                                *output_sample = sample;
+                            }
                         }
+
+                        *phase_locked += 1.0 / resample_ratio;
                     }
 
-                    *phase_locked += 1.0 / resample_ratio;
+                    // Reset phase when it gets too large
+                    if process_len > 0 {
+                        *phase_locked = (*phase_locked % process_len as f64).max(0.0);
+                    }
+                } else {
+                    // Fallback: output silence if any lock fails
+                    data[..mono_len].fill(0.0);
                 }
-
-                // Reset phase when it gets too large
-                *phase_locked = (*phase_locked % input_buffer.len() as f64).max(0.0);
             },
             move |_err| {
                 // Send error (use owned string to avoid format! allocation in callback)
