@@ -55,8 +55,8 @@ impl LooperEngine {
             debug_mode: Arc::new(Mutex::new(false)),
             tempo: Arc::new(Mutex::new(TempoEngine::new(config.sample_rate, 120.0, 4))),
             beat_sync_enabled: Arc::new(Mutex::new(true)),
-            pending_play: Arc::new(Mutex::new(Vec::new())),
-            pending_stop: Arc::new(Mutex::new(Vec::new())),
+            pending_play: Arc::new(Mutex::new(Vec::with_capacity(config.max_layers))),
+            pending_stop: Arc::new(Mutex::new(Vec::with_capacity(config.max_layers))),
             pending_record: Arc::new(Mutex::new(None)),
             metronome_enabled: Arc::new(Mutex::new(false)),
             metronome_sample: Arc::new(Mutex::new(Vec::new())),
@@ -82,12 +82,8 @@ impl LooperEngine {
         // For now, removed to prevent blocking
 
         // Write input to lock-free buffer (non-blocking)
-        if !self.input_buffer.try_write(input)
-            && let Ok(debug_mode) = self.debug_mode.try_lock()
-            && *debug_mode
-        {
-            eprintln!("Warning: Input buffer overrun or lock contention");
-        }
+        // Silently drop if buffer is full (avoid eprintln! in audio thread)
+        let _ = self.input_buffer.try_write(input);
 
         // Process commands from UI thread
         self.process_commands();
@@ -445,9 +441,8 @@ impl LooperEngine {
                         });
                 }
 
-                if let Err(e) = self.send_command(command) {
-                    eprintln!("Command processing error: {}", e);
-                }
+                // Silently drop errors (avoid eprintln! in audio thread)
+                let _ = self.send_command(command);
             }
         }
     }
@@ -769,7 +764,10 @@ impl LooperEngine {
                     .unwrap_or(true);
                 if sync {
                     if let Ok(mut v) = self.pending_play.try_lock() {
-                        v.push(layer_id);
+                        // Only push if capacity allows (avoid reallocation)
+                        if v.len() < v.capacity() {
+                            v.push(layer_id);
+                        }
                     }
                 } else if let Ok(mut layer) = self.layers[layer_id].try_lock() {
                     layer.start_playing();
@@ -784,7 +782,10 @@ impl LooperEngine {
                     .unwrap_or(true);
                 if sync {
                     if let Ok(mut v) = self.pending_stop.try_lock() {
-                        v.push(layer_id);
+                        // Only push if capacity allows (avoid reallocation)
+                        if v.len() < v.capacity() {
+                            v.push(layer_id);
+                        }
                     }
                 } else if let Ok(mut layer) = self.layers[layer_id].try_lock() {
                     layer.stop_playing();

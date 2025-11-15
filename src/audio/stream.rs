@@ -265,12 +265,11 @@ impl AudioStream {
 
                 looper_clone.store_input_samples(&mono_buffer[..frame_count]);
             },
-            move |err| {
-                // Send error
-                let _ = input_err_sender.try_send(super::AudioEvent::Error(format!(
-                    "Input stream error: {}",
-                    err
-                )));
+            move |_err| {
+                // Send error (use owned string to avoid format! allocation in callback)
+                // Note: Error callbacks may run in audio thread depending on backend
+                let _ = input_err_sender
+                    .try_send(super::AudioEvent::Error(String::from("Input stream error")));
                 // Try to get a new default input and notify UI
                 let new_input = cpal::default_host()
                     .default_input_device()
@@ -367,10 +366,11 @@ impl AudioStream {
                 // Reset phase when it gets too large
                 *phase_locked = (*phase_locked % input_buffer.len() as f64).max(0.0);
             },
-            move |err| {
-                let _ = output_err_sender.try_send(super::AudioEvent::Error(format!(
-                    "Output stream error: {}",
-                    err
+            move |_err| {
+                // Send error (use owned string to avoid format! allocation in callback)
+                // Note: Error callbacks may run in audio thread depending on backend
+                let _ = output_err_sender.try_send(super::AudioEvent::Error(String::from(
+                    "Output stream error",
                 )));
                 // Try to get a new default output and notify UI
                 let new_output = cpal::default_host()

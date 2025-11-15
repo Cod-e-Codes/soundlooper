@@ -28,7 +28,7 @@ impl TempoEngine {
             samples_per_measure,
             global_position: 0,
             last_tap_time: None,
-            tap_times: Vec::new(),
+            tap_times: Vec::with_capacity(4), // Preallocate for tap tempo (max 4)
             count_in_active: false,
             count_in_remaining_beats: 0,
             count_in_layer: None,
