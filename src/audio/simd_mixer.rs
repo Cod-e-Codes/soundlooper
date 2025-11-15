@@ -7,15 +7,22 @@ use std::sync::{Arc, Mutex};
 use wide::f32x4;
 
 /// SIMD-accelerated mixer for combining multiple audio layers
-pub struct SimdMixer {}
+pub struct SimdMixer {
+    // Preallocated scratch buffer for layer samples
+    scratch_buffer: Vec<f32>,
+}
 
 impl SimdMixer {
-    pub fn new(_max_buffer_size: usize) -> Self {
-        Self {}
+    pub fn new(max_buffer_size: usize) -> Self {
+        Self {
+            // Allocate once during construction, reuse forever
+            scratch_buffer: vec![0.0; max_buffer_size],
+        }
     }
 
     /// Mix multiple layers into output buffer using SIMD
     /// This is 2-4x faster than scalar mixing for 4+ layers
+    /// REAL-TIME SAFE: Zero allocations, uses preallocated scratch buffer
     pub fn mix_layers(&mut self, layers: &[Arc<Mutex<AudioLayer>>], output: &mut [f32]) {
         // Clear output
         self.clear_buffer_simd(output);
@@ -29,15 +36,25 @@ impl SimdMixer {
             }
         });
 
-        // Mix each layer
+        // Ensure scratch buffer is large enough (should never grow in practice)
+        let buffer_len = output.len();
+        if self.scratch_buffer.len() < buffer_len {
+            // This should only happen once at startup if buffer sizes change
+            self.scratch_buffer.resize(buffer_len, 0.0);
+        }
+
+        // Mix each layer using preallocated scratch buffer
         for layer_arc in layers {
             if let Ok(mut layer) = layer_arc.try_lock() {
                 if !Self::should_mix_layer(&layer, has_solo) {
                     continue;
                 }
 
-                let samples = layer.get_next_samples(output.len());
-                self.add_buffer_simd(output, &samples, layer.volume);
+                // NO ALLOCATION: Write directly to scratch buffer
+                layer.fill_next_samples(&mut self.scratch_buffer[..buffer_len]);
+
+                // NO ALLOCATION: Mix scratch into output
+                self.add_buffer_simd(output, &self.scratch_buffer[..buffer_len], layer.volume);
             }
         }
 
@@ -131,15 +148,31 @@ impl SimdMixer {
 // SCALAR FALLBACK (for platforms without SIMD)
 // ==============================================================================
 
-pub struct ScalarMixer;
+pub struct ScalarMixer {
+    // Preallocated scratch buffer
+    scratch_buffer: Vec<f32>,
+}
 
 impl ScalarMixer {
-    pub fn mix_layers(layers: &[Arc<Mutex<AudioLayer>>], output: &mut [f32]) {
+    pub fn new(max_buffer_size: usize) -> Self {
+        Self {
+            scratch_buffer: vec![0.0; max_buffer_size],
+        }
+    }
+
+    /// REAL-TIME SAFE: Zero allocations
+    pub fn mix_layers(&mut self, layers: &[Arc<Mutex<AudioLayer>>], output: &mut [f32]) {
         output.fill(0.0);
 
         let has_solo = layers
             .iter()
             .any(|layer| layer.try_lock().map(|l| l.is_solo).unwrap_or(false));
+
+        // Ensure scratch buffer is large enough
+        let buffer_len = output.len();
+        if self.scratch_buffer.len() < buffer_len {
+            self.scratch_buffer.resize(buffer_len, 0.0);
+        }
 
         for layer_arc in layers {
             if let Ok(mut layer) = layer_arc.try_lock() {
@@ -147,9 +180,12 @@ impl ScalarMixer {
                     continue;
                 }
 
-                let samples = layer.get_next_samples(output.len());
+                // NO ALLOCATION: Write to scratch buffer
+                let scratch = &mut self.scratch_buffer[..buffer_len];
+                layer.fill_next_samples(scratch);
 
-                for (i, &sample) in samples.iter().enumerate() {
+                // Mix into output buffer
+                for (i, &sample) in scratch.iter().enumerate() {
                     if i < output.len() {
                         output[i] += sample * layer.volume;
                     }
@@ -193,9 +229,10 @@ mod tests {
         let mut simd_output = vec![0.0; 1024];
         let mut scalar_output = vec![0.0; 1024];
 
-        let mut mixer = SimdMixer::new(1024);
-        mixer.mix_layers(&layers, &mut simd_output);
-        ScalarMixer::mix_layers(&layers, &mut scalar_output);
+        let mut simd_mixer = SimdMixer::new(1024);
+        let mut scalar_mixer = ScalarMixer::new(1024);
+        simd_mixer.mix_layers(&layers, &mut simd_output);
+        scalar_mixer.mix_layers(&layers, &mut scalar_output);
 
         // Results should be very close (accounting for floating point differences)
         for (simd, scalar) in simd_output.iter().zip(scalar_output.iter()) {

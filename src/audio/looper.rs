@@ -30,6 +30,10 @@ pub struct LooperEngine {
     count_in_mode: Arc<Mutex<bool>>,
     // SIMD mixer
     simd_mixer: Arc<Mutex<SimdMixer>>,
+    // Preallocated scratch buffer for fallback mixing
+    scratch_buffer: Arc<Mutex<Vec<f32>>>,
+    // Preallocated scratch buffer for recording
+    recording_scratch: Arc<Mutex<Vec<f32>>>,
 }
 
 impl LooperEngine {
@@ -59,6 +63,10 @@ impl LooperEngine {
             metronome_playhead: Arc::new(Mutex::new(None)),
             count_in_mode: Arc::new(Mutex::new(false)),
             simd_mixer: Arc::new(Mutex::new(SimdMixer::new(config.buffer_size * 2))),
+            // Preallocate scratch buffer for fallback mixing
+            scratch_buffer: Arc::new(Mutex::new(vec![0.0; config.buffer_size * 2])),
+            // Preallocate recording buffer
+            recording_scratch: Arc::new(Mutex::new(vec![0.0; config.buffer_size * 2])),
         }
     }
 
@@ -70,7 +78,7 @@ impl LooperEngine {
 
     pub fn process_audio(&self, input: &[f32], output: &mut [f32]) {
         // Debug: Log when process_audio is called (periodically, only in debug mode)
-        if let Ok(debug_mode) = self.debug_mode.lock()
+        if let Ok(debug_mode) = self.debug_mode.try_lock()
             && *debug_mode
         {
             use std::sync::atomic::{AtomicUsize, Ordering};
@@ -96,7 +104,7 @@ impl LooperEngine {
 
         // Write input to lock-free buffer (non-blocking)
         if !self.input_buffer.try_write(input)
-            && let Ok(debug_mode) = self.debug_mode.lock()
+            && let Ok(debug_mode) = self.debug_mode.try_lock()
             && *debug_mode
         {
             eprintln!("Warning: Input buffer overrun or lock contention");
@@ -105,17 +113,25 @@ impl LooperEngine {
         // Process commands from UI thread
         self.process_commands();
 
-        // Record input if any layer is recording
-        if let Ok(recording_layer) = self.recording_layer.lock()
+        // Record input if any layer is recording (zero allocations)
+        if let Ok(recording_layer) = self.recording_layer.try_lock()
             && let Some(layer_id) = *recording_layer
-            && let Ok(mut layer) = self.layers[layer_id].lock()
+            && let Ok(mut layer) = self.layers[layer_id].try_lock()
+            && layer.is_recording
         {
-            // Read from input buffer for recording
-            let mut temp_buffer = vec![0.0; input.len()];
-            let read_count = self.input_buffer.try_read(&mut temp_buffer);
-            if read_count > 0 {
-                layer.append_samples(&temp_buffer[..read_count]);
+            // Try to get recording scratch buffer
+            if let Ok(mut temp_buffer) = self.recording_scratch.try_lock() {
+                // Ensure buffer is large enough
+                if temp_buffer.len() < input.len() {
+                    temp_buffer.resize(input.len(), 0.0);
+                }
+
+                let read_count = self.input_buffer.try_read(&mut temp_buffer[..input.len()]);
+                if read_count > 0 {
+                    layer.append_samples(&temp_buffer[..read_count]);
+                }
             }
+            // If we can't get the scratch buffer, skip this cycle (rare)
         }
 
         // Mix all layers using SIMD acceleration
@@ -123,7 +139,7 @@ impl LooperEngine {
             mixer.mix_layers(&self.layers, output);
         } else {
             // Fallback to scalar mixing if SIMD mixer is locked
-            Self::mix_layers_static(&self.layers, output);
+            Self::mix_layers_static(&self.layers, output, &self.scratch_buffer);
         }
 
         // Mix metronome if active
@@ -131,14 +147,20 @@ impl LooperEngine {
 
         // Only process tempo if beat sync or metronome is enabled
         let (beat_sync_enabled, metronome_enabled) = (
-            self.beat_sync_enabled.lock().map(|b| *b).unwrap_or(false),
-            self.metronome_enabled.lock().map(|b| *b).unwrap_or(false),
+            self.beat_sync_enabled
+                .try_lock()
+                .map(|b| *b)
+                .unwrap_or(false),
+            self.metronome_enabled
+                .try_lock()
+                .map(|b| *b)
+                .unwrap_or(false),
         );
 
         if beat_sync_enabled || metronome_enabled {
             let processed_samples = input.len();
             let (crossed_measure, crossed_beat, count_in_data) = {
-                if let Ok(mut tempo) = self.tempo.lock() {
+                if let Ok(mut tempo) = self.tempo.try_lock() {
                     let prev_measure = tempo.get_current_measure();
                     let prev_beat = tempo.get_current_beat();
                     tempo.advance(processed_samples);
@@ -179,12 +201,12 @@ impl LooperEngine {
         }
 
         // Check if we need to set master loop length
-        if let Ok(recording_layer) = self.recording_layer.lock()
+        if let Ok(recording_layer) = self.recording_layer.try_lock()
             && let Some(layer_id) = *recording_layer
-            && let Ok(layer) = self.layers[layer_id].lock()
+            && let Ok(layer) = self.layers[layer_id].try_lock()
             && layer.is_recording
             && !layer.buffer.is_empty()
-            && let Ok(mut master_len) = self.master_loop_length.lock()
+            && let Ok(mut master_len) = self.master_loop_length.try_lock()
             && master_len.is_none()
         {
             // This is the first layer recording, set it as master
@@ -193,24 +215,37 @@ impl LooperEngine {
     }
 
     fn trigger_metronome_click(&self) {
-        if let Ok(enabled) = self.metronome_enabled.lock()
+        if let Ok(enabled) = self.metronome_enabled.try_lock()
             && *enabled
+            && let Ok(mut playhead) = self.metronome_playhead.try_lock()
         {
-            let mut playhead = self.metronome_playhead.lock().unwrap();
             *playhead = Some(0);
         }
     }
 
     fn mix_metronome(&self, output_buf: &mut [f32]) {
-        let enabled = self.metronome_enabled.lock().map(|b| *b).unwrap_or(false);
+        let enabled = self
+            .metronome_enabled
+            .try_lock()
+            .map(|b| *b)
+            .unwrap_or(false);
         if !enabled {
             return;
         }
-        let mut playhead_lock = self.metronome_playhead.lock().unwrap();
+        let mut playhead_lock = match self.metronome_playhead.try_lock() {
+            Ok(lock) => lock,
+            Err(_) => return, // Skip if locked
+        };
         let Some(mut playhead) = *playhead_lock else {
             return;
         };
-        let sample = self.metronome_sample.lock().unwrap();
+        let sample = match self.metronome_sample.try_lock() {
+            Ok(lock) => lock,
+            Err(_) => {
+                *playhead_lock = None;
+                return;
+            }
+        };
         if sample.is_empty() {
             *playhead_lock = None;
             return;
@@ -235,22 +270,20 @@ impl LooperEngine {
 
     fn run_scheduled_actions(&self) {
         // Count-in complete: only auto-start recording if count-in mode is enabled
-        if let Ok(mut tempo) = self.tempo.lock()
+        if let Ok(mut tempo) = self.tempo.try_lock()
             && !tempo.count_in_active
             && tempo.count_in_layer.is_some()
             && tempo.count_in_remaining_beats == 0
             && let Some(layer_id) = tempo.count_in_layer.take()
         {
             self.send_event(AudioEvent::CountInFinished { layer_id });
-            let start_on_boundary = self.count_in_mode.lock().map(|g| *g).unwrap_or(false);
-            if start_on_boundary && let Ok(mut layer) = self.layers[layer_id].lock() {
+            let start_on_boundary = self.count_in_mode.try_lock().map(|g| *g).unwrap_or(false);
+            if start_on_boundary && let Ok(mut layer) = self.layers[layer_id].try_lock() {
                 layer.start_recording();
-                {
-                    let mut recording_layer = self.recording_layer.lock().unwrap();
+                if let Ok(mut recording_layer) = self.recording_layer.try_lock() {
                     *recording_layer = Some(layer_id);
                 }
-                {
-                    let mut is_recording = self.is_recording.lock().unwrap();
+                if let Ok(mut is_recording) = self.is_recording.try_lock() {
                     *is_recording = true;
                 }
                 self.send_event(AudioEvent::LayerRecording(layer_id));
@@ -258,11 +291,11 @@ impl LooperEngine {
         }
 
         // Play actions
-        if let Ok(mut to_play) = self.pending_play.lock() {
+        if let Ok(mut to_play) = self.pending_play.try_lock() {
             let layers_to_play: Vec<usize> = to_play.drain(..).collect();
             drop(to_play);
             for layer_id in layers_to_play {
-                if let Ok(mut layer) = self.layers[layer_id].lock()
+                if let Ok(mut layer) = self.layers[layer_id].try_lock()
                     && !layer.buffer.is_empty()
                 {
                     layer.start_playing();
@@ -272,11 +305,11 @@ impl LooperEngine {
         }
 
         // Stop actions
-        if let Ok(mut to_stop) = self.pending_stop.lock() {
+        if let Ok(mut to_stop) = self.pending_stop.try_lock() {
             let layers_to_stop: Vec<usize> = to_stop.drain(..).collect();
             drop(to_stop);
             for layer_id in layers_to_stop {
-                if let Ok(mut layer) = self.layers[layer_id].lock() {
+                if let Ok(mut layer) = self.layers[layer_id].try_lock() {
                     layer.stop_playing();
                     self.send_event(AudioEvent::LayerStopped(layer_id));
                 }
@@ -284,29 +317,32 @@ impl LooperEngine {
         }
 
         // Record action (without count-in)
-        if let Ok(mut pending_rec) = self.pending_record.lock()
+        if let Ok(mut pending_rec) = self.pending_record.try_lock()
             && let Some(layer_id) = pending_rec.take()
-            && let Ok(mut layer) = self.layers[layer_id].lock()
+            && let Ok(mut layer) = self.layers[layer_id].try_lock()
         {
             layer.start_recording();
-            {
-                let mut recording_layer = self.recording_layer.lock().unwrap();
+            if let Ok(mut recording_layer) = self.recording_layer.try_lock() {
                 *recording_layer = Some(layer_id);
             }
-            {
-                let mut is_recording = self.is_recording.lock().unwrap();
+            if let Ok(mut is_recording) = self.is_recording.try_lock() {
                 *is_recording = true;
             }
             self.send_event(AudioEvent::LayerRecording(layer_id));
         }
     }
 
-    fn mix_layers_static(layers: &Arc<Vec<Arc<Mutex<AudioLayer>>>>, output: &mut [f32]) {
+    /// REAL-TIME SAFE: Zero allocations, uses preallocated scratch buffer
+    fn mix_layers_static(
+        layers: &Arc<Vec<Arc<Mutex<AudioLayer>>>>,
+        output: &mut [f32],
+        scratch_buffer: &Arc<Mutex<Vec<f32>>>,
+    ) {
         let mut has_solo = false;
 
         // Check if any layer is soloed
         for layer_arc in layers.iter() {
-            if let Ok(layer) = layer_arc.lock()
+            if let Ok(layer) = layer_arc.try_lock()
                 && layer.is_solo
             {
                 has_solo = true;
@@ -314,9 +350,56 @@ impl LooperEngine {
             }
         }
 
-        // Mix layers
+        // Clear output
+        output.fill(0.0);
+
+        // Get scratch buffer (should never block in practice)
+        let mut scratch = match scratch_buffer.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                // Fallback: mix without scratch buffer (slower but safe)
+                for layer_arc in layers.iter() {
+                    if let Ok(mut layer) = layer_arc.try_lock() {
+                        if !layer.is_playing || layer.is_muted || (has_solo && !layer.is_solo) {
+                            continue;
+                        }
+
+                        // Mix directly sample by sample (no allocation)
+                        let buffer_len = layer.buffer.len();
+                        let loop_len = layer.loop_end - layer.loop_start;
+
+                        if loop_len == 0 {
+                            continue;
+                        }
+
+                        for output_sample in output.iter_mut() {
+                            if layer.playback_position >= buffer_len {
+                                layer.playback_position = layer.loop_start;
+                            }
+
+                            let sample = layer.buffer[layer.playback_position];
+                            let volume_sample = sample * layer.volume;
+                            *output_sample += volume_sample;
+                            layer.playback_position += 1;
+                        }
+
+                        // Update meter
+                        layer.meter.update(output);
+                    }
+                }
+                return;
+            }
+        };
+
+        // Ensure scratch buffer is large enough
+        let buffer_len = output.len();
+        if scratch.len() < buffer_len {
+            scratch.resize(buffer_len, 0.0);
+        }
+
+        // Mix layers using scratch buffer
         for layer_arc in layers.iter() {
-            if let Ok(mut layer) = layer_arc.lock() {
+            if let Ok(mut layer) = layer_arc.try_lock() {
                 if !layer.is_playing {
                     continue;
                 }
@@ -331,11 +414,12 @@ impl LooperEngine {
                     continue;
                 }
 
-                // Get samples from this layer
-                let layer_samples = layer.get_next_samples(output.len());
+                // NO ALLOCATION: Fill scratch buffer
+                let scratch_slice = &mut scratch[..buffer_len];
+                layer.fill_next_samples(scratch_slice);
 
                 // Mix into output buffer
-                for (i, sample) in layer_samples.iter().enumerate() {
+                for (i, &sample) in scratch_slice.iter().enumerate() {
                     output[i] += sample;
                 }
             }
@@ -363,7 +447,7 @@ impl LooperEngine {
     }
 
     fn process_commands(&self) {
-        // FIX: Use try_lock to avoid blocking the audio thread
+        // Use try_lock to avoid blocking the audio thread
         // If we can't get the lock immediately, skip this cycle - we'll get it next time
         let receiver_opt = match self.command_receiver.try_lock() {
             Ok(guard) => guard.clone(),
@@ -371,9 +455,9 @@ impl LooperEngine {
         };
 
         if let Some(ref cmd_receiver) = receiver_opt {
-            // Collect all available commands without holding any locks
-            let mut commands = Vec::new();
             let debug_mode = self.debug_mode.try_lock().map(|d| *d).unwrap_or(false);
+
+            // Process commands one-by-one without collecting (zero allocations)
             while let Ok(command) = cmd_receiver.try_recv() {
                 if debug_mode {
                     let _ = std::fs::OpenOptions::new()
@@ -385,11 +469,7 @@ impl LooperEngine {
                             writeln!(file, "Received command: {:?}", command)
                         });
                 }
-                commands.push(command);
-            }
 
-            // Process all commands (locks are released above)
-            for command in commands {
                 if let Err(e) = self.send_command(command) {
                     eprintln!("Command processing error: {}", e);
                 }
@@ -421,24 +501,20 @@ impl LooperEngine {
                 }
 
                 // Stop any current recording
-                {
-                    let recording_layer = self.recording_layer.lock().unwrap();
-                    if let Some(current_layer) = *recording_layer
-                        && let Ok(mut layer) = self.layers[current_layer].lock()
+                if let Ok(recording_layer) = self.recording_layer.try_lock()
+                    && let Some(current_layer) = *recording_layer
+                        && let Ok(mut layer) = self.layers[current_layer].try_lock()
                     {
                         layer.stop_recording();
                     }
-                }
 
                 // Start recording on new layer
-                if let Ok(mut layer) = self.layers[layer_id].lock() {
+                if let Ok(mut layer) = self.layers[layer_id].try_lock() {
                     layer.start_recording();
-                    {
-                        let mut recording_layer = self.recording_layer.lock().unwrap();
+                    if let Ok(mut recording_layer) = self.recording_layer.try_lock() {
                         *recording_layer = Some(layer_id);
                     }
-                    {
-                        let mut is_recording = self.is_recording.lock().unwrap();
+                    if let Ok(mut is_recording) = self.is_recording.try_lock() {
                         *is_recording = true;
                     }
                     self.send_event(AudioEvent::LayerRecording(layer_id));
@@ -449,19 +525,16 @@ impl LooperEngine {
                     return Err("Layer ID out of range".into());
                 }
 
-                if let Ok(mut layer) = self.layers[layer_id].lock() {
+                if let Ok(mut layer) = self.layers[layer_id].try_lock() {
                     layer.stop_recording(); // This automatically starts playback if there's content
                     self.send_event(AudioEvent::LayerStopped(layer_id));
                 }
 
-                {
-                    let mut recording_layer = self.recording_layer.lock().unwrap();
-                    if *recording_layer == Some(layer_id) {
+                if let Ok(mut recording_layer) = self.recording_layer.try_lock()
+                    && *recording_layer == Some(layer_id) {
                         *recording_layer = None;
                     }
-                }
-                {
-                    let mut is_recording = self.is_recording.lock().unwrap();
+                if let Ok(mut is_recording) = self.is_recording.try_lock() {
                     *is_recording = false;
                 }
             }
@@ -470,7 +543,7 @@ impl LooperEngine {
                     return Err("Layer ID out of range".into());
                 }
 
-                if let Ok(mut layer) = self.layers[layer_id].lock() {
+                if let Ok(mut layer) = self.layers[layer_id].try_lock() {
                     layer.stop_playing();
                     self.send_event(AudioEvent::LayerStopped(layer_id));
                 }
@@ -480,7 +553,7 @@ impl LooperEngine {
                     return Err("Layer ID out of range".into());
                 }
 
-                if let Ok(mut layer) = self.layers[layer_id].lock() {
+                if let Ok(mut layer) = self.layers[layer_id].try_lock() {
                     layer.start_playing();
                     self.send_event(AudioEvent::LayerPlaying(layer_id));
                 }
@@ -490,7 +563,7 @@ impl LooperEngine {
                     return Err("Layer ID out of range".into());
                 }
 
-                if let Ok(mut layer) = self.layers[layer_id].lock() {
+                if let Ok(mut layer) = self.layers[layer_id].try_lock() {
                     layer.toggle_mute();
                     if layer.is_muted {
                         self.send_event(AudioEvent::LayerMuted(layer_id));
@@ -504,7 +577,7 @@ impl LooperEngine {
                     return Err("Layer ID out of range".into());
                 }
 
-                if let Ok(mut layer) = self.layers[layer_id].lock() {
+                if let Ok(mut layer) = self.layers[layer_id].try_lock() {
                     layer.toggle_solo();
                     if layer.is_solo {
                         self.send_event(AudioEvent::LayerSoloed(layer_id));
@@ -518,24 +591,22 @@ impl LooperEngine {
                     return Err("Layer ID out of range".into());
                 }
 
-                if let Ok(mut layer) = self.layers[layer_id].lock() {
+                if let Ok(mut layer) = self.layers[layer_id].try_lock() {
                     layer.set_volume(volume);
                     self.send_event(AudioEvent::VolumeChanged(layer_id, volume));
                 }
             }
             LayerCommand::StopAll => {
                 for layer_arc in self.layers.iter() {
-                    if let Ok(mut layer) = layer_arc.lock() {
+                    if let Ok(mut layer) = layer_arc.try_lock() {
                         layer.stop_recording();
                         layer.stop_playing();
                     }
                 }
-                {
-                    let mut recording_layer = self.recording_layer.lock().unwrap();
+                if let Ok(mut recording_layer) = self.recording_layer.try_lock() {
                     *recording_layer = None;
                 }
-                {
-                    let mut is_recording = self.is_recording.lock().unwrap();
+                if let Ok(mut is_recording) = self.is_recording.try_lock() {
                     *is_recording = false;
                 }
                 self.send_event(AudioEvent::AllStopped);
@@ -545,35 +616,30 @@ impl LooperEngine {
                     return Err("Layer ID out of range".into());
                 }
 
-                if let Ok(mut layer) = self.layers[layer_id].lock() {
+                if let Ok(mut layer) = self.layers[layer_id].try_lock() {
                     layer.clear();
                     self.send_event(AudioEvent::LayerCleared(layer_id));
                 }
 
                 // If this was the recording layer, clear it
-                {
-                    let mut recording_layer = self.recording_layer.lock().unwrap();
-                    if *recording_layer == Some(layer_id) {
+                if let Ok(mut recording_layer) = self.recording_layer.try_lock()
+                    && *recording_layer == Some(layer_id) {
                         *recording_layer = None;
                     }
-                }
-                {
-                    let mut is_recording = self.is_recording.lock().unwrap();
+                if let Ok(mut is_recording) = self.is_recording.try_lock() {
                     *is_recording = false;
                 }
             }
             LayerCommand::ClearAll => {
                 for layer_arc in self.layers.iter() {
-                    if let Ok(mut layer) = layer_arc.lock() {
+                    if let Ok(mut layer) = layer_arc.try_lock() {
                         layer.clear();
                     }
                 }
-                {
-                    let mut recording_layer = self.recording_layer.lock().unwrap();
+                if let Ok(mut recording_layer) = self.recording_layer.try_lock() {
                     *recording_layer = None;
                 }
-                {
-                    let mut is_recording = self.is_recording.lock().unwrap();
+                if let Ok(mut is_recording) = self.is_recording.try_lock() {
                     *is_recording = false;
                 }
             }
@@ -582,7 +648,7 @@ impl LooperEngine {
                     return Err("Layer ID out of range".into());
                 }
 
-                if let Ok(mut layer) = self.layers[layer_id].lock()
+                if let Ok(mut layer) = self.layers[layer_id].try_lock()
                     && layer.undo()
                 {
                     self.send_event(AudioEvent::LayerUpdated(layer_id));
@@ -593,7 +659,7 @@ impl LooperEngine {
                     return Err("Layer ID out of range".into());
                 }
 
-                if let Ok(mut layer) = self.layers[layer_id].lock()
+                if let Ok(mut layer) = self.layers[layer_id].try_lock()
                     && layer.redo()
                 {
                     self.send_event(AudioEvent::LayerUpdated(layer_id));
@@ -601,7 +667,7 @@ impl LooperEngine {
             }
             LayerCommand::PlayAll => {
                 for layer_arc in self.layers.iter() {
-                    if let Ok(mut layer) = layer_arc.lock()
+                    if let Ok(mut layer) = layer_arc.try_lock()
                         && !layer.buffer.is_empty()
                     {
                         layer.start_playing();
@@ -616,7 +682,7 @@ impl LooperEngine {
 
                 match super::io::import_wav(&file_path, self.config.sample_rate) {
                     Ok(samples) => {
-                        if let Ok(mut layer) = self.layers[layer_id].lock() {
+                        if let Ok(mut layer) = self.layers[layer_id].try_lock() {
                             layer.buffer = samples;
                             layer.loop_end = layer.buffer.len();
                             self.send_event(AudioEvent::WavImported(layer_id, file_path));
@@ -632,7 +698,9 @@ impl LooperEngine {
                 let layer_buffers: Vec<Vec<f32>> = self
                     .layers
                     .iter()
-                    .filter_map(|layer_arc| layer_arc.lock().ok().map(|layer| layer.buffer.clone()))
+                    .filter_map(|layer_arc| {
+                        layer_arc.try_lock().ok().map(|layer| layer.buffer.clone())
+                    })
                     .collect();
 
                 match super::io::export_mixed_wav(
@@ -650,66 +718,78 @@ impl LooperEngine {
             }
             // Tempo / Sync controls
             LayerCommand::TapTempo => {
-                if let Ok(mut t) = self.tempo.lock() {
+                if let Ok(mut t) = self.tempo.try_lock() {
                     t.tap_tempo();
                     let bpm = t.bpm;
                     self.send_event(AudioEvent::BpmChanged(bpm));
                 }
             }
             LayerCommand::SetBpm(bpm) => {
-                if let Ok(mut t) = self.tempo.lock() {
+                if let Ok(mut t) = self.tempo.try_lock() {
                     t.set_bpm(bpm);
                     let bpm = t.bpm;
                     self.send_event(AudioEvent::BpmChanged(bpm));
                 }
             }
             LayerCommand::ToggleBeatSync(enabled) => {
-                if let Ok(mut flag) = self.beat_sync_enabled.lock() {
+                if let Ok(mut flag) = self.beat_sync_enabled.try_lock() {
                     *flag = enabled;
                 }
             }
             LayerCommand::ToggleCountInMode(enabled) => {
-                if let Ok(mut flag) = self.count_in_mode.lock() {
+                if let Ok(mut flag) = self.count_in_mode.try_lock() {
                     *flag = enabled;
                 }
                 self.send_event(AudioEvent::CountInModeToggled(enabled));
             }
             LayerCommand::StartCountIn { layer_id, measures } => {
-                if let Ok(mut t) = self.tempo.lock() {
+                if let Ok(mut t) = self.tempo.try_lock() {
                     let beats = measures.saturating_mul(t.beats_per_measure);
                     t.start_count_in(layer_id, beats);
                     self.send_event(AudioEvent::CountInStarted { layer_id, beats });
                 }
             }
             LayerCommand::SyncPlay(layer_id) => {
-                let sync = self.beat_sync_enabled.lock().map(|b| *b).unwrap_or(true);
+                let sync = self
+                    .beat_sync_enabled
+                    .try_lock()
+                    .map(|b| *b)
+                    .unwrap_or(true);
                 if sync {
-                    if let Ok(mut v) = self.pending_play.lock() {
+                    if let Ok(mut v) = self.pending_play.try_lock() {
                         v.push(layer_id);
                     }
-                } else if let Ok(mut layer) = self.layers[layer_id].lock() {
+                } else if let Ok(mut layer) = self.layers[layer_id].try_lock() {
                     layer.start_playing();
                     self.send_event(AudioEvent::LayerPlaying(layer_id));
                 }
             }
             LayerCommand::SyncStop(layer_id) => {
-                let sync = self.beat_sync_enabled.lock().map(|b| *b).unwrap_or(true);
+                let sync = self
+                    .beat_sync_enabled
+                    .try_lock()
+                    .map(|b| *b)
+                    .unwrap_or(true);
                 if sync {
-                    if let Ok(mut v) = self.pending_stop.lock() {
+                    if let Ok(mut v) = self.pending_stop.try_lock() {
                         v.push(layer_id);
                     }
-                } else if let Ok(mut layer) = self.layers[layer_id].lock() {
+                } else if let Ok(mut layer) = self.layers[layer_id].try_lock() {
                     layer.stop_playing();
                     self.send_event(AudioEvent::LayerStopped(layer_id));
                 }
             }
             LayerCommand::SyncRecord(layer_id) => {
-                let sync = self.beat_sync_enabled.lock().map(|b| *b).unwrap_or(true);
+                let sync = self
+                    .beat_sync_enabled
+                    .try_lock()
+                    .map(|b| *b)
+                    .unwrap_or(true);
                 if sync {
-                    let count_in_on = self.count_in_mode.lock().map(|b| *b).unwrap_or(false);
+                    let count_in_on = self.count_in_mode.try_lock().map(|b| *b).unwrap_or(false);
                     if count_in_on {
                         // Count-in enabled: start a count-in for one measure, then (optionally) auto-start when finished (handled above)
-                        if let Ok(mut t) = self.tempo.lock()
+                        if let Ok(mut t) = self.tempo.try_lock()
                             && !t.count_in_active
                         {
                             let beats = t.beats_per_measure;
@@ -718,25 +798,23 @@ impl LooperEngine {
                         }
                     } else {
                         // Count-in disabled: schedule recording to start at next measure boundary
-                        if let Ok(mut pending_rec) = self.pending_record.lock() {
+                        if let Ok(mut pending_rec) = self.pending_record.try_lock() {
                             *pending_rec = Some(layer_id);
                         }
                     }
-                } else if let Ok(mut layer) = self.layers[layer_id].lock() {
+                } else if let Ok(mut layer) = self.layers[layer_id].try_lock() {
                     layer.start_recording();
-                    {
-                        let mut recording_layer = self.recording_layer.lock().unwrap();
+                    if let Ok(mut recording_layer) = self.recording_layer.try_lock() {
                         *recording_layer = Some(layer_id);
                     }
-                    {
-                        let mut is_recording = self.is_recording.lock().unwrap();
+                    if let Ok(mut is_recording) = self.is_recording.try_lock() {
                         *is_recording = true;
                     }
                     self.send_event(AudioEvent::LayerRecording(layer_id));
                 }
             }
             LayerCommand::ToggleMetronome(enabled) => {
-                if let Ok(mut flag) = self.metronome_enabled.lock() {
+                if let Ok(mut flag) = self.metronome_enabled.try_lock() {
                     *flag = enabled;
                 }
                 self.send_event(AudioEvent::MetronomeToggled(enabled));

@@ -88,20 +88,26 @@ impl AudioLayer {
         self.buffer.extend_from_slice(samples);
     }
 
-    pub fn get_next_samples(&mut self, count: usize) -> Vec<f32> {
+    /// REAL-TIME SAFE: Zero allocations, writes to existing buffer
+    pub fn fill_next_samples(&mut self, output: &mut [f32]) {
+        let count = output.len();
+
+        // Fast path: silent or not playing
         if !self.is_playing || self.buffer.is_empty() {
-            return vec![0.0; count];
+            output.fill(0.0);
+            return;
         }
 
-        let mut output = Vec::with_capacity(count);
         let buffer_len = self.buffer.len();
         let loop_len = self.loop_end - self.loop_start;
 
         if loop_len == 0 {
-            return vec![0.0; count];
+            output.fill(0.0);
+            return;
         }
 
-        for _ in 0..count {
+        // Generate samples directly into output buffer
+        for output_sample in output.iter_mut().take(count) {
             if self.playback_position >= buffer_len {
                 self.playback_position = self.loop_start;
             }
@@ -112,14 +118,20 @@ impl AudioLayer {
             } else {
                 sample * self.volume
             };
-            output.push(volume_sample);
 
+            *output_sample = volume_sample;
             self.playback_position += 1;
         }
 
-        // Update peak meter
-        self.meter.update(&output);
+        // Update peak meter (no allocations)
+        self.meter.update(output);
+    }
 
+    /// DEPRECATED: Use fill_next_samples() instead for real-time safety
+    /// This method allocates a Vec on every call and should not be used in audio callbacks
+    pub fn get_next_samples(&mut self, count: usize) -> Vec<f32> {
+        let mut output = vec![0.0; count];
+        self.fill_next_samples(&mut output);
         output
     }
 
