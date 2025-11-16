@@ -133,13 +133,30 @@ impl LooperEngine {
 
         if beat_sync_enabled || metronome_enabled {
             let processed_samples = input.len();
+
+            // Get state BEFORE advancing
+            let (prev_measure, prev_beat_number) = {
+                if let Ok(tempo) = self.tempo.try_lock() {
+                    (
+                        tempo.get_current_measure(),
+                        tempo.global_position / tempo.samples_per_beat,
+                    )
+                } else {
+                    (0, 0)
+                }
+            };
+
+            // Advance tempo and check for crossings
             let (crossed_measure, crossed_beat, count_in_data) = {
                 if let Ok(mut tempo) = self.tempo.try_lock() {
-                    let prev_measure = tempo.get_current_measure();
-                    let prev_beat = tempo.get_current_beat();
                     tempo.advance(processed_samples);
+
                     let curr_measure = tempo.get_current_measure();
-                    let curr_beat = tempo.get_current_beat();
+                    let curr_beat_number = tempo.global_position / tempo.samples_per_beat;
+
+                    let crossed_measure = curr_measure != prev_measure;
+                    let crossed_beat = curr_beat_number > prev_beat_number;
+
                     let count_in_data =
                         if tempo.count_in_active && tempo.count_in_remaining_beats > 0 {
                             tempo
@@ -148,11 +165,7 @@ impl LooperEngine {
                         } else {
                             None
                         };
-                    (
-                        curr_measure != prev_measure,
-                        curr_beat != prev_beat,
-                        count_in_data,
-                    )
+                    (crossed_measure, crossed_beat, count_in_data)
                 } else {
                     (false, false, None)
                 }
@@ -160,11 +173,12 @@ impl LooperEngine {
 
             if crossed_measure {
                 self.run_scheduled_actions();
+                // Trigger metronome ONLY on measure boundaries (downbeat)
+                self.trigger_metronome_click();
             }
 
             if crossed_beat {
-                self.trigger_metronome_click();
-                // Emit count-in event without additional lock acquisition
+                // Emit count-in event (but don't trigger metronome on every beat)
                 if let Some((layer_id, remaining_beats)) = count_in_data {
                     self.send_event(AudioEvent::CountInTick {
                         layer_id,

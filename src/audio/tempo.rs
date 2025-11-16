@@ -7,12 +7,13 @@ pub struct TempoEngine {
     pub sample_rate: u32,
     pub samples_per_beat: usize,
     pub samples_per_measure: usize,
-    pub global_position: usize, // Position in samples since start
+    pub global_position: usize,
     pub last_tap_time: Option<Instant>,
     pub tap_times: Vec<Instant>,
     pub count_in_active: bool,
     pub count_in_remaining_beats: u32,
     pub count_in_layer: Option<usize>,
+    last_processed_beat: usize, // NEW: Track last beat to prevent double-triggers
 }
 
 impl TempoEngine {
@@ -28,10 +29,11 @@ impl TempoEngine {
             samples_per_measure,
             global_position: 0,
             last_tap_time: None,
-            tap_times: Vec::with_capacity(4), // Preallocate for tap tempo (max 4)
+            tap_times: Vec::with_capacity(4),
             count_in_active: false,
             count_in_remaining_beats: 0,
             count_in_layer: None,
+            last_processed_beat: 0, // NEW
         }
     }
 
@@ -87,25 +89,25 @@ impl TempoEngine {
         self.last_tap_time = Some(now);
     }
 
+    // UPDATED: Fixed advance method
     pub fn advance(&mut self, sample_count: usize) {
         let previous_position = self.global_position;
         self.global_position = self.global_position.saturating_add(sample_count);
 
-        // Handle count-in
-        if self.count_in_active {
-            let beats_elapsed = self.global_position / self.samples_per_beat;
-            let previous_beats = previous_position / self.samples_per_beat;
+        // Calculate current beat number (total beats since start)
+        let current_beat_number = self.global_position / self.samples_per_beat;
+        let previous_beat_number = previous_position / self.samples_per_beat;
 
-            // Check if we've crossed a beat boundary
-            if beats_elapsed > previous_beats {
-                let beats_crossed = beats_elapsed - previous_beats;
-                if self.count_in_remaining_beats >= beats_crossed as u32 {
-                    self.count_in_remaining_beats -= beats_crossed as u32;
-                } else {
-                    self.count_in_remaining_beats = 0;
-                }
+        // Only trigger if we've crossed into a NEW beat that hasn't been processed
+        if current_beat_number > previous_beat_number
+            && current_beat_number > self.last_processed_beat
+        {
+            self.last_processed_beat = current_beat_number;
 
-                // Count-in complete
+            // Handle count-in
+            if self.count_in_active && self.count_in_remaining_beats > 0 {
+                self.count_in_remaining_beats -= 1;
+
                 if self.count_in_remaining_beats == 0 {
                     self.count_in_active = false;
                 }
@@ -152,6 +154,7 @@ impl TempoEngine {
 
     pub fn reset_position(&mut self) {
         self.global_position = 0;
+        self.last_processed_beat = 0; // UPDATED
     }
 }
 
