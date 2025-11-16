@@ -54,34 +54,42 @@ impl TempoEngine {
             let elapsed = now.duration_since(last_tap).as_secs_f64();
 
             // If tap is within reasonable range (20-300 BPM equivalent)
+            // 0.2s = 300 BPM, 3.0s = 20 BPM
             if (0.2..=3.0).contains(&elapsed) {
-                self.tap_times.push(now);
+                // Calculate BPM from this single tap interval
+                let new_bpm = 60.0 / elapsed;
 
-                // Keep only the last 4 taps for averaging
-                if self.tap_times.len() > 4 {
-                    self.tap_times.remove(0);
-                }
-
-                // Calculate average BPM from recent taps
-                if self.tap_times.len() >= 2 {
-                    let total_time = self
+                // If we have previous taps, do a weighted average (favor recent taps)
+                if !self.tap_times.is_empty() {
+                    // Calculate BPM from last tap interval
+                    let last_interval = self
                         .tap_times
                         .last()
-                        .unwrap()
-                        .duration_since(self.tap_times[0])
-                        .as_secs_f64();
-                    let intervals = (self.tap_times.len() - 1) as f64;
-                    let avg_interval = total_time / intervals;
-                    let new_bpm = 60.0 / avg_interval;
+                        .map(|last| now.duration_since(*last).as_secs_f64())
+                        .unwrap_or(elapsed);
+                    let last_bpm = 60.0 / last_interval;
+
+                    // Weighted average: 70% new tap, 30% previous (smooth but responsive)
+                    let averaged_bpm = new_bpm * 0.7 + last_bpm * 0.3;
+                    self.set_bpm(averaged_bpm);
+                } else {
+                    // First real tap (second overall), just use it directly
                     self.set_bpm(new_bpm);
                 }
+
+                self.tap_times.push(now);
+
+                // Keep only the last 2 taps (we only need the most recent for smoothing)
+                if self.tap_times.len() > 2 {
+                    self.tap_times.remove(0);
+                }
             } else {
-                // Reset if too long between taps
+                // Reset if too long between taps (>3s means they're starting over)
                 self.tap_times.clear();
                 self.tap_times.push(now);
             }
         } else {
-            // First tap
+            // First tap - just record it, don't calculate yet
             self.tap_times.clear();
             self.tap_times.push(now);
         }
