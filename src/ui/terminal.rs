@@ -1231,9 +1231,34 @@ impl TerminalUI {
             scroll_offset,
         }) = input_mode
         {
+            // Minimum terminal size check
+            const MIN_WIDTH: u16 = 60;
+            const MIN_HEIGHT: u16 = 10;
+
+            if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
+                // Terminal too small - show error message instead
+                let error_msg = Paragraph::new(format!(
+                    "Terminal too small for file picker!\nMinimum size: {}x{}\nCurrent size: {}x{}\nPress ESC to close",
+                    MIN_WIDTH, MIN_HEIGHT, area.width, area.height
+                ))
+                .style(Style::default().fg(Color::Red))
+                .alignment(ratatui::layout::Alignment::Center)
+                .wrap(ratatui::widgets::Wrap { trim: true });
+
+                let centered_area = Rect::new(
+                    area.x,
+                    area.y + area.height / 2,
+                    area.width,
+                    5.min(area.height),
+                );
+                f.render_widget(error_msg, centered_area);
+                return;
+            }
+
             // Create a centered overlay
-            let overlay_width = 60u16;
+            let overlay_width = MIN_WIDTH;
             let overlay_height = ((entries.len() + 5).min(20)) as u16; // +5 for title, path, instructions, and borders
+            let overlay_height = overlay_height.min(area.height.saturating_sub(2)); // Ensure it fits
             let x = (area.width.saturating_sub(overlay_width)) / 2;
             let y = (area.height.saturating_sub(overlay_height)) / 2;
 
@@ -1344,8 +1369,32 @@ impl TerminalUI {
             scroll_offset,
         }) = input_mode
         {
-            let overlay_width = 70u16;
-            let overlay_height = 20u16;
+            // Minimum terminal size check
+            const MIN_WIDTH: u16 = 70;
+            const MIN_HEIGHT: u16 = 20;
+
+            if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
+                // Terminal too small - show error message instead
+                let error_msg = Paragraph::new(format!(
+                    "Terminal too small for device picker!\nMinimum size: {}x{}\nCurrent size: {}x{}\nPress ESC to close",
+                    MIN_WIDTH, MIN_HEIGHT, area.width, area.height
+                ))
+                .style(Style::default().fg(Color::Red))
+                .alignment(ratatui::layout::Alignment::Center)
+                .wrap(ratatui::widgets::Wrap { trim: true });
+
+                let centered_area = Rect::new(
+                    area.x,
+                    area.y + area.height / 2,
+                    area.width,
+                    5.min(area.height),
+                );
+                f.render_widget(error_msg, centered_area);
+                return;
+            }
+
+            let overlay_width = MIN_WIDTH;
+            let overlay_height = MIN_HEIGHT;
             let x = (area.width.saturating_sub(overlay_width)) / 2;
             let y = (area.height.saturating_sub(overlay_height)) / 2;
 
